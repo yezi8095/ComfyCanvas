@@ -56,6 +56,7 @@ const TIMELINE_LABEL_WIDTH = 52;
 const MAX_TRACKS_PER_KIND = 5;
 const MIN_CLIP_DURATION = 0.25;
 const DEFAULT_CLIP_DURATION = 5;
+const EMPTY_TIMELINE_DURATION = 30;
 const EDIT_TAIL_SECONDS = 30;
 const BASE_TRACKS: Array<TrackInfo & { id: "video-main" | "audio-main" | "text-main" }> = [
   { id: "video-main", kind: "video", name: "视频 1" },
@@ -493,7 +494,7 @@ export default function DirectorMode({
   // 成片的长度始终取三条轨道中最晚结束的内容：图片/视频、背景音频、文字。
   // 这样任意一条轨道延长后，时间线和播放终点都会同步延长；没有内容时才保留 5 秒空轨道。
   const sequenceEnd = Math.max(visualEnd, audioEnd, textEnd);
-  const total = sequenceEnd > 0 ? sequenceEnd : 5;
+  const total = sequenceEnd > 0 ? sequenceEnd : EMPTY_TIMELINE_DURATION;
   // The first visible video row is the upper visual layer. Its layer index
   // must therefore be larger than the rows displayed below it.
   const videoTracks = tracksFor("video");
@@ -528,7 +529,9 @@ export default function DirectorMode({
   const previewStyle = previewPortrait && activeAspect
     ? {
       aspectRatio: "9 / 16",
-      width: "min(100%, calc((100vh - 330px) * .5625))",
+      width: "auto",
+      height: "100%",
+      maxWidth: "100%",
       maxHeight: "100%",
     }
     : undefined;
