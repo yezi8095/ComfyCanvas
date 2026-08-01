@@ -1,0 +1,9 @@
+node_modules/
+dist/
+target/
+target-*/
+src-tauri/target/
+src-tauri/target-*/
+release/
+*.pdb
+*.d
