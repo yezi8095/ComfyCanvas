@@ -4183,3 +4183,41 @@ button,
   inset: 0 !important;
   border-radius: inherit;
 }
+
+/* 导演台布局必须由窗口决定，不能被素材数量反向撑开。
+   右侧素材卡片只在自己的列表中滚动，预览区和时间线尺寸保持稳定。 */
+.director-overlay {
+  position: fixed;
+  overflow: hidden;
+}
+.director-shell {
+  height: min(930px, calc(100vh - 24px));
+  height: min(930px, calc(100dvh - 24px));
+  max-height: calc(100vh - 24px);
+  max-height: calc(100dvh - 24px);
+}
+.director-shell .director-main {
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.director-shell .director-script,
+.director-shell .director-stage,
+.director-shell .director-assets {
+  min-height: 0;
+  max-height: 100%;
+  overflow: hidden;
+}
+.director-shell .director-assets-head,
+.director-shell .director-asset-groups,
+.director-shell .director-assets-tip {
+  flex: 0 0 auto;
+}
+.director-shell .director-assets-list {
+  min-height: 0;
+  flex: 1 1 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
