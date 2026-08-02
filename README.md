@@ -22,7 +22,7 @@ npm.cmd run tauri -- build
 
 ## 外部运行依赖
 
-视频导出需要 FFmpeg。FFmpeg 是第三方外部依赖，不属于本项目源码，也因当前 Windows 二进制文件为 144,550,912 字节、超过 GitHub 普通仓库单文件 100MB 限制而不提交。
+视频导出需要 FFmpeg。FFmpeg 是第三方外部依赖，不属于本项目源码，也因当前 Windows 二进制文件为 144,550,912 字节、超过 GitHub 普通仓库单文件 100MB 限制而不提交。正式 NSIS 安装包构建时会从 `release/ffmpeg.exe` 自动打包 FFmpeg；单独分发裸 EXE 时仍需按下列方式提供。
 
 使用方式任选其一：
 
@@ -36,7 +36,7 @@ npm.cmd run tauri -- build
 SHA256 1128471E5CCF6A08FD4DCCE8791B123495A831F704AC9F9F5DF0023F774A2F3D
 ```
 
-本地 ComfyUI 也是独立程序，不包含在此仓库中；应用会连接用户已有的 ComfyUI 服务。
+本地 ComfyUI 也是独立程序，不包含在此仓库中；应用会连接用户已有的 ComfyUI 服务。应用优先检查正在运行的 `8188/8189` 端口，不再依赖固定磁盘路径。需要提示未启动的自定义安装位置时，可设置 `YM_COMFYUI_PATH`。
 
 ## 未纳入仓库的内容
 

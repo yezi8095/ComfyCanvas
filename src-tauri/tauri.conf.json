@@ -4,6 +4,6 @@
   "version":"0.1.0",
   "identifier":"com.yezi8095.offlinecomfycanvas",
   "build":{"frontendDist":"../dist","devUrl":"http://127.0.0.1:1430","beforeDevCommand":"npm run dev","beforeBuildCommand":"npm run build"},
-  "app":{"windows":[{"title":"亿幕画布","width":1440,"height":920,"minWidth":1000,"minHeight":700,"resizable":true}],"security":{"csp":null,"assetProtocol":{"enable":true,"scope":["D:\\ComfyUI-aki-v2\\ComfyUI\\output\\**"]}}},
-  "bundle":{"active":true,"targets":["nsis"]}
+  "app":{"windows":[{"title":"亿幕画布","width":1440,"height":920,"minWidth":1000,"minHeight":700,"resizable":true}],"security":{"csp":null,"assetProtocol":{"enable":true,"scope":["**"]}}},
+  "bundle":{"active":true,"targets":["nsis"],"resources":{"../release/ffmpeg.exe":"ffmpeg.exe"}}
 }
