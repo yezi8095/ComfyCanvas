@@ -471,7 +471,7 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem("ym-openai-config") || "{}") as { endpoint?: string; apiKey?: string; model?: string }; } catch { return {}; }
   });
   const [defaultSaveDir, setDefaultSaveDir] = useState(
-    () => localStorage.getItem("ym-default-save-dir") || "C:\\Users\\Administrator\\Documents",
+    () => localStorage.getItem("ym-default-save-dir") || "",
   );
   const [theme, setTheme] = useState(() => localStorage.getItem("ym-theme") || "mint");
   const [topMenuOpen, setTopMenuOpen] = useState(false);
@@ -1703,12 +1703,27 @@ setPanning(false);
     setMessage("已新建项目");
   };
   const exportProject = async () => {
-    const content = JSON.stringify(safeProject(project), null, 2);
+    const canvasProject = safeProject(project);
+    const readStoredJson = (key: string, fallback: unknown) => {
+      try { return JSON.parse(localStorage.getItem(key) || "") as unknown; } catch { return fallback; }
+    };
+    const content = JSON.stringify({
+      ...canvasProject,
+      __ymProjectPackage: 1,
+      director: readStoredJson(`ym-director-editor-v3:${historyId}`, null),
+      directorAssets: readStoredJson(`ym-director-assets-v1:${historyId}`, []),
+    }, null, 2);
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
       const { invoke } = await import("@tauri-apps/api/core");
+      const filename = `亿幕画布项目-${new Date().toISOString().slice(0, 10)}.json`;
+      let defaultPath = filename;
+      if (defaultSaveDir) {
+        const { join } = await import("@tauri-apps/api/path");
+        defaultPath = await join(defaultSaveDir, filename);
+      }
       const path = await save({
-        defaultPath: `${defaultSaveDir}\\亿幕画布项目-${new Date().toISOString().slice(0, 10)}.json`,
+        defaultPath,
         filters: [{ name: "离线画布项目", extensions: ["json"] }],
       });
       if (!path) return;
@@ -1784,14 +1799,23 @@ setPanning(false);
       try {
         const p = JSON.parse(String(r.result));
         if (!Array.isArray(p.nodes)) throw Error();
+        const nextProjectId = newId();
+        if (p.__ymProjectPackage === 1) {
+          if (p.director && typeof p.director === "object") {
+            localStorage.setItem(`ym-director-editor-v3:${nextProjectId}`, JSON.stringify(p.director));
+          }
+          if (Array.isArray(p.directorAssets)) {
+            localStorage.setItem(`ym-director-assets-v1:${nextProjectId}`, JSON.stringify(p.directorAssets));
+          }
+        }
         setProject({
           nodes: p.nodes,
           links: p.links || [],
           view: p.view || { x: 190, y: 130, zoom: 1 },
         });
-        setHistoryId(newId());
+        setHistoryId(nextProjectId);
         setSelected([]);
-        setMessage("项目已打开（本地媒体需重新放入）");
+        setMessage(p.__ymProjectPackage === 1 ? "完整项目已打开，导演台时间线与素材已恢复" : "旧版项目已打开（缺失的本地媒体需重新放入）");
       } catch {
         setMessage("项目文件格式不正确");
       }
@@ -2083,7 +2107,7 @@ setPanning(false);
         status?: { status_str?: string };
         outputs?: Record<
           string,
-          { images?: OutputFile[]; gifs?: OutputFile[] }
+          { images?: OutputFile[]; gifs?: OutputFile[]; videos?: OutputFile[]; audio?: OutputFile[] }
         >;
       };
       let history: Record<string, HistoryItem> | undefined;
@@ -2107,7 +2131,7 @@ setPanning(false);
       if (!outputs) throw Error("ComfyUI 未返回生成文件");
       const generated: NodeItem[] = [];
       Object.values(outputs).forEach((output) =>
-        [...(output.images || []), ...(output.gifs || [])].forEach((file) => {
+        [...(output.images || []), ...(output.gifs || []), ...(output.videos || []), ...(output.audio || [])].forEach((file) => {
           const lower = file.filename.toLowerCase();
           const kind: Kind = /\.(mp4|webm|mov|avi)$/i.test(lower)
             ? "video"

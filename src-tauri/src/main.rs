@@ -45,6 +45,27 @@ fn comfy_reachable(port: u16) -> bool {
   text.starts_with("HTTP/1.1 200")
 }
 
+fn comfyui_candidates() -> Vec<PathBuf> {
+  let mut candidates = Vec::new();
+  if let Ok(configured) = env::var("YM_COMFYUI_PATH") {
+    candidates.push(PathBuf::from(configured));
+  }
+  if let Ok(profile) = env::var("USERPROFILE") {
+    let profile = PathBuf::from(profile);
+    candidates.push(profile.join("ComfyUI"));
+    candidates.push(profile.join("Documents").join("ComfyUI"));
+    candidates.push(profile.join("Desktop").join("ComfyUI"));
+  }
+  for drive in ["C:", "D:", "E:", "F:"] {
+    let root = PathBuf::from(format!(r"{drive}\"));
+    candidates.push(root.join("ComfyUI"));
+    candidates.push(root.join("ComfyUI").join("ComfyUI"));
+    candidates.push(root.join("ComfyUI_windows_portable").join("ComfyUI"));
+    candidates.push(root.join("ComfyUI-aki-v2").join("ComfyUI"));
+  }
+  candidates
+}
+
 fn usable_ffmpeg(path: &Path) -> bool {
   Command::new(path)
     .arg("-version")
@@ -109,8 +130,8 @@ fn find_comfyui() -> ComfyStatus {
   for port in [8188, 8189] {
     if comfy_reachable(port) { return ComfyStatus { connected: true, endpoint: format!("http://127.0.0.1:{port}"), detail: "已验证并连接到 ComfyUI".into() }; }
   }
-  let known = [r"D:\ComfyUI-aki-v2\ComfyUI", r"D:\ComfyUI\ComfyUI", r"C:\ComfyUI\ComfyUI"];
-  if let Some(path) = known.iter().find(|path| Path::new(path).exists()) {
+  if let Some(found) = comfyui_candidates().into_iter().find(|path| path.is_dir()) {
+    let path = found.to_string_lossy();
     return ComfyStatus { connected: false, endpoint: "".into(), detail: format!("已找到 ComfyUI：{path}，请先在启动器中启动它") };
   }
   ComfyStatus { connected: false, endpoint: "".into(), detail: "没有找到正在运行的 ComfyUI；请先用启动器启动 ComfyUI".into() }
@@ -415,10 +436,14 @@ async fn rewrite_alibaba_prompt(endpoint: String, api_key: String, prompt: Strin
 #[tauri::command]
 async fn upload_comfy_media(endpoint: String, filename: String, data_url: Option<String>, local_path: Option<String>) -> Result<String, String> {
   let bytes = if let Some(path) = local_path {
-    let output = Path::new(r"D:\ComfyUI-aki-v2\ComfyUI\output");
     let source = Path::new(&path);
-    if !source.starts_with(output) { return Err("只允许复用 ComfyUI 输出目录内的素材".into()); }
-    fs::read(source).map_err(|e| e.to_string())?
+    if !source.is_file() { return Err(format!("素材文件不存在：{}", source.display())); }
+    let extension = source.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase();
+    let allowed = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif", "mp4", "webm", "mov", "avi", "mp3", "wav", "m4a", "aac", "flac", "ogg"];
+    if !allowed.contains(&extension.as_str()) { return Err("只允许上传图片、视频或音频素材".into()); }
+    let size = source.metadata().map_err(|error| error.to_string())?.len();
+    if size > 1024 * 1024 * 1024 { return Err("单个素材不能超过 1 GB".into()); }
+    fs::read(source).map_err(|error| format!("无法读取素材 {}：{error}", source.display()))?
   } else if let Some(data) = data_url {
     let encoded = data.split_once(",").map(|(_, body)| body).ok_or("媒体数据格式不正确")?;
     base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|e| e.to_string())?
@@ -436,30 +461,10 @@ async fn upload_comfy_media(endpoint: String, filename: String, data_url: Option
 #[tauri::command]
 async fn get_comfy_history(endpoint: String, prompt_id: String) -> Result<serde_json::Value, String> {
   let url = format!("{}/history/{}", endpoint.trim_end_matches('/'), prompt_id);
-  let mut history: serde_json::Value = reqwest::Client::new().get(url).send().await.map_err(|e| e.to_string())?
+  let history: serde_json::Value = reqwest::Client::new().get(url).send().await.map_err(|e| e.to_string())?
     .error_for_status().map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
-  if let Some(entries) = history.as_object_mut() {
-    for entry in entries.values_mut() {
-      if let Some(outputs) = entry.get_mut("outputs").and_then(serde_json::Value::as_object_mut) {
-        for output in outputs.values_mut() {
-          for key in ["images", "gifs"] {
-            if let Some(files) = output.get_mut(key).and_then(serde_json::Value::as_array_mut) {
-              for file in files {
-                if file.get("fullpath").is_none() {
-                  let filename = file.get("filename").and_then(serde_json::Value::as_str).unwrap_or("");
-                  let subfolder = file.get("subfolder").and_then(serde_json::Value::as_str).unwrap_or("");
-                  if !filename.is_empty() && !filename.contains("..") && !subfolder.contains("..") {
-                    let path = if subfolder.is_empty() { format!(r"D:\ComfyUI-aki-v2\ComfyUI\output\{}", filename) } else { format!(r"D:\ComfyUI-aki-v2\ComfyUI\output\{}\{}", subfolder, filename) };
-                    if let Some(object) = file.as_object_mut() { object.insert("fullpath".into(), serde_json::Value::String(path)); }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
+  // ComfyUI can run from any drive or a remote machine. The frontend uses
+  // ComfyUI's `/view` endpoint instead of inventing a machine-specific path.
   Ok(history)
 }
 
