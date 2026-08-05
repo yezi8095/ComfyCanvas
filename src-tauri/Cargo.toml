@@ -14,3 +14,5 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 base64 = "0.22"
 tokio = { version = "1", features = ["time"] }
+hmac = "0.12"
+sha2 = "0.10"

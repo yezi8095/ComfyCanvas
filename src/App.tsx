@@ -47,7 +47,7 @@ type OnlineReference = {
   source: "external" | "generated";
 };
 type DetectedProviderModel = { id: string; kind: "text" | "image" | "video" | "unknown"; modes?: CloudVideoMode[]; purpose: string };
-type OnlineProviderConfig = { endpoint: string; apiKey: string; model: string; custom?: boolean; detectedModels?: DetectedProviderModel[] };
+type OnlineProviderConfig = { endpoint: string; apiKey: string; apiSecret?: string; model: string; custom?: boolean; detectedModels?: DetectedProviderModel[] };
 type OnlineProviderConfigs = Record<string, OnlineProviderConfig>;
 type CloudSettings = { endpoint: string; accessToken: string; accountLabel: string };
 type StoryboardRow = {
@@ -96,6 +96,20 @@ const generationSourceLabel: Record<GenerationSource, string> = {
 };
 const ONLINE_PROVIDER_DEFAULTS: Record<string, Omit<OnlineProviderConfig, "apiKey">> = {
   "阿里百炼·万相": { endpoint: "https://dashscope.aliyuncs.com/api/v1", model: "wan2.6-t2v" },
+  "可灵 Kling": {
+    endpoint: "https://api.klingai.com",
+    model: "kling-v1-6",
+    detectedModels: [
+      { id: "kling-v1-6", kind: "video", modes: ["text", "image"], purpose: "视频 · 文生视频 / 图生视频" },
+    ],
+  },
+  "豆包·火山方舟": {
+    endpoint: "https://ark.cn-beijing.volces.com/api/v3",
+    model: "doubao-seedance-1-0-pro-250528",
+    detectedModels: [
+      { id: "doubao-seedance-1-0-pro-250528", kind: "video", modes: ["text", "image", "reference"], purpose: "视频 · 文生视频 / 图生视频 / 多图参考" },
+    ],
+  },
   "腾讯混元": { endpoint: "https://hunyuan.tencentcloudapi.com", model: "HunyuanVideo" },
   "MiniMax Hailuo": { endpoint: "https://api.minimaxi.com", model: "video-01" },
   "fal.ai": { endpoint: "https://fal.run", model: "fal-ai/wan-i2v" },
@@ -497,17 +511,15 @@ export default function App() {
     return () => document.removeEventListener("pointerdown", closeComposerFromOutside, true);
   }, [activeAiNode, activeOnlineVideo]);
 
-  const selectedOnlineProvider = onlineProviderConfigs[onlineConfigProvider] || {
-    ...ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider],
-    apiKey: "",
-  };
+  const selectedOnlineProvider = onlineProviderConfigs[onlineConfigProvider]
+    ? { ...ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider], ...onlineProviderConfigs[onlineConfigProvider] }
+    : { ...ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider], apiKey: "" };
   const onlineProviderNames = [...new Set([...Object.keys(ONLINE_PROVIDER_DEFAULTS), ...Object.keys(onlineProviderConfigs)])];
   const updateOnlineProviderConfig = (patch: Partial<OnlineProviderConfig>) => {
     setOnlineProviderConfigs((current) => {
-      const base = current[onlineConfigProvider] || {
-        ...ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider],
-        apiKey: "",
-      };
+      const base = current[onlineConfigProvider]
+        ? { ...ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider], ...current[onlineConfigProvider] }
+        : { ...ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider], apiKey: "" };
       return { ...current, [onlineConfigProvider]: { ...base, ...patch } };
     });
   };
@@ -2559,17 +2571,23 @@ setPanning(false);
               <label>接口地址
                 <input value={selectedOnlineProvider.endpoint} onChange={(event) => updateOnlineProviderConfig({ endpoint: event.target.value })} />
               </label>
-              <label>API 密钥
-                <input type="password" value={selectedOnlineProvider.apiKey} onChange={(event) => updateOnlineProviderConfig({ apiKey: event.target.value })} placeholder="粘贴平台 API Key" />
+              <label>{onlineConfigProvider === "可灵 Kling" ? "Access Key" : "API 密钥"}
+                <input type="password" value={selectedOnlineProvider.apiKey} onChange={(event) => updateOnlineProviderConfig({ apiKey: event.target.value })} placeholder={onlineConfigProvider === "可灵 Kling" ? "粘贴可灵 Access Key" : "粘贴平台 API Key"} />
               </label>
-              <div className="provider-model-discovery"><button disabled={discoveringModels || !selectedOnlineProvider.endpoint?.trim()} onClick={() => void discoverProviderModels()}>{discoveringModels ? "正在读取模型…" : "自动读取并识别模型"}</button><small>适用于提供 OpenAI 兼容 `/models` 接口的平台；密钥只在本机请求时使用。</small></div>
+              {onlineConfigProvider === "可灵 Kling" && <label>Secret Key
+                <input type="password" value={selectedOnlineProvider.apiSecret || ""} onChange={(event) => updateOnlineProviderConfig({ apiSecret: event.target.value })} placeholder="粘贴可灵 Secret Key（只保存在本机）" />
+              </label>}
+              {onlineConfigProvider === "可灵 Kling" || onlineConfigProvider === "豆包·火山方舟"
+                ? <div className="provider-model-discovery"><small>该平台使用专用视频协议，已内置模型用途识别；也可在下面填写控制台实际开通的模型 ID。</small></div>
+                : <div className="provider-model-discovery"><button disabled={discoveringModels || !selectedOnlineProvider.endpoint?.trim()} onClick={() => void discoverProviderModels()}>{discoveringModels ? "正在读取模型…" : "自动读取并识别模型"}</button><small>适用于提供 OpenAI 兼容 `/models` 接口的平台；密钥只在本机请求时使用。</small></div>}
               <label>默认模型
-                {selectedOnlineProvider.detectedModels?.length ? <select value={selectedOnlineProvider.model} onChange={(event) => updateOnlineProviderConfig({ model: event.target.value })}>{selectedOnlineProvider.detectedModels.map((model) => <option value={model.id} key={model.id}>{model.id}｜{model.purpose}</option>)}</select> : <input value={selectedOnlineProvider.model} onChange={(event) => updateOnlineProviderConfig({ model: event.target.value })} placeholder="例如 wanx2.1-t2v-turbo" />}
+                <input list="online-provider-model-options" value={selectedOnlineProvider.model} onChange={(event) => updateOnlineProviderConfig({ model: event.target.value })} placeholder="填写控制台中的模型 ID" />
+                {selectedOnlineProvider.detectedModels?.length ? <datalist id="online-provider-model-options">{selectedOnlineProvider.detectedModels.map((model) => <option value={model.id} key={model.id}>{model.purpose}</option>)}</datalist> : null}
               </label>
               {selectedOnlineProvider.detectedModels?.length ? <div className="detected-model-summary">{(["text", "image", "video", "unknown"] as const).map((kind) => { const count = selectedOnlineProvider.detectedModels!.filter((model) => model.kind === kind).length; return count ? <span className={kind} key={kind}>{kind === "text" ? "文本" : kind === "image" ? "图片" : kind === "video" ? "视频" : "待确认"} {count}</span> : null; })}<small>系统只在对应类型节点展示已确认模型；“待确认”模型不会自动调用。</small></div> : null}
               <small className="online-provider-note">保存后，AI 节点会按识别到的模型类型和能力自动筛选。不同平台的生成提交协议仍可能不同；只有完成协议适配的平台才会真正发起任务。</small>
               <footer>
-                <button className="primary" onClick={() => { localStorage.setItem(ONLINE_PROVIDER_STORE, JSON.stringify(onlineProviderConfigs)); setMessage(`${onlineConfigProvider} 的自带密钥配置已保存到本机`); setOnlineApiOpen(false); }}>保存本机配置</button>
+                <button className="primary" onClick={() => { const next = { ...onlineProviderConfigs, [onlineConfigProvider]: selectedOnlineProvider as OnlineProviderConfig }; setOnlineProviderConfigs(next); localStorage.setItem(ONLINE_PROVIDER_STORE, JSON.stringify(next)); setMessage(`${onlineConfigProvider} 的自带密钥配置已保存到本机`); setOnlineApiOpen(false); }}>保存本机配置</button>
               </footer>
             </> : <>
               <div className={`cloud-config-status ${cloudConfigured ? "configured" : ""}`}>
@@ -3191,14 +3209,16 @@ setPanning(false);
                   <div className="online-video-body" onPointerDown={(event) => event.stopPropagation()}>
                   <div className="online-video-topline">
                     <span className="online-video-signal" />
-                    <select value={config.provider} onChange={(event) => update({ provider: event.target.value })}>
+                    <select value={config.provider} onChange={(event) => {
+                      const provider = event.target.value;
+                      const saved = onlineProviderConfigs[provider];
+                      const defaults = ONLINE_PROVIDER_DEFAULTS[provider];
+                      const providerConfig = saved ? { ...defaults, ...saved } : defaults;
+                      const model = (providerConfig?.detectedModels || []).find((item) => item.kind === "video");
+                      update({ provider, model: providerConfig?.model, ...(model?.modes?.length ? { mode: model.modes[0] } : {}) });
+                    }}>
                       <option>未选择平台</option>
-                      <option>腾讯混元</option>
-                      <option>阿里百炼·万相</option>
-                      <option>MiniMax Hailuo</option>
-                      <option>Hugging Face</option>
-                      <option>fal.ai</option>
-                      <option>Replicate</option>
+                      {onlineProviderNames.map((provider) => <option key={provider}>{provider}</option>)}
                     </select>
                     <select value={config.mode} onChange={(event) => update({ mode: event.target.value as OnlineVideoSettings["mode"] })}>
                       {Object.entries(modeLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
@@ -3577,7 +3597,16 @@ setPanning(false);
         const cloudModel = cloudModels.find((model) => model.id === config.model) || defaultCloudModel("video", cloudPlatform);
         const cloudMode = (config.mode || "text") as CloudVideoMode;
         const cloudModeText = (cloudModel?.videoModes || []).map((mode) => CLOUD_VIDEO_MODE_LABELS[mode]).join(" / ");
-        const byokModels = (onlineProviderConfigs[config.provider || ""]?.detectedModels || []).filter((model) => model.kind === "video");
+        const savedByokProvider = onlineProviderConfigs[config.provider || ""];
+        const defaultByokProvider = ONLINE_PROVIDER_DEFAULTS[config.provider || ""];
+        const activeByokProvider = savedByokProvider
+          ? { ...defaultByokProvider, ...savedByokProvider }
+          : defaultByokProvider ? { ...defaultByokProvider, apiKey: "" } : undefined;
+        const detectedByokModels = (activeByokProvider?.detectedModels || []).filter((model) => model.kind === "video");
+        const customByokModel = activeByokProvider?.model && !detectedByokModels.some((model) => model.id === activeByokProvider.model)
+          ? { ...classifyProviderModel(activeByokProvider.model), modes: detectedByokModels[0]?.modes || classifyProviderModel(activeByokProvider.model).modes }
+          : undefined;
+        const byokModels = customByokModel ? [customByokModel, ...detectedByokModels] : detectedByokModels;
         const byokModel = byokModels.find((model) => model.id === config.model) || byokModels[0];
         const cloudEstimate = config.source === "cloud" ? estimateCloudPoints("video", cloudModel?.id, {
           promptLength: (config.prompt || "").length + linkedTextInputs.join("\n").length,
@@ -3687,14 +3716,21 @@ setPanning(false);
               setMessage("请先选择平台并保存自带 API Key。 ");
               return;
             }
-            const providerConfig = onlineProviderConfigs[config.provider || ""];
+            const savedProviderConfig = onlineProviderConfigs[config.provider || ""];
+            const defaultProviderConfig = ONLINE_PROVIDER_DEFAULTS[config.provider || ""];
+            const providerConfig = savedProviderConfig ? { ...defaultProviderConfig, ...savedProviderConfig } : undefined;
             if (!providerConfig?.endpoint || !providerConfig.apiKey || !providerConfig.model) {
               openOnlineConfiguration("byok", config.provider);
               setMessage(`请先完成“${config.provider}”的接口地址、密钥和模型配置。`);
               return;
             }
-            if (config.provider !== "阿里百炼·万相") {
-              setMessage(`“${config.provider}”的专用视频协议仍在接入中；当前请使用阿里百炼·万相的文生视频。`);
+            if (config.provider === "可灵 Kling" && !providerConfig.apiSecret?.trim()) {
+              openOnlineConfiguration("byok", config.provider);
+              setMessage("可灵官方接口需要同时填写 Access Key 和 Secret Key。");
+              return;
+            }
+            if (!["阿里百炼·万相", "可灵 Kling", "豆包·火山方舟"].includes(config.provider || "")) {
+              setMessage(`“${config.provider}”还没有专用视频协议适配，请使用万相、可灵或豆包。`);
               return;
             }
             const mentionedReference = Array.from(prompt.matchAll(/@图片(\d+)/g))
@@ -3709,28 +3745,40 @@ setPanning(false);
               if (/^wanx?2\.1/i.test(model)) return "wanx2.1-i2v-turbo";
               return model;
             };
-            const requestModel = imageModel(providerConfig.model);
+            const configuredModel = config.model || providerConfig.model;
+            const requestModel = config.provider === "阿里百炼·万相" ? imageModel(configuredModel) : configuredModel;
+            const selectedImageReferences = config.mode === "reference"
+              ? references.filter((item) => item.kind === "image" && Boolean(item.src))
+              : config.mode === "text" ? [] : selectedImageReference ? [selectedImageReference] : [];
+            if (config.mode !== "text" && selectedImageReferences.length === 0) {
+              setMessage(`“${CLOUD_VIDEO_MODE_LABELS[(config.mode || "text") as CloudVideoMode]}”需要先添加或连接图片参考。`);
+              return;
+            }
+            const providerShortName = config.provider === "可灵 Kling" ? "可灵" : config.provider === "豆包·火山方舟" ? "豆包" : "万相";
             change((p) => ({ ...p, nodes: p.nodes.map((node) => node.id === activeOnlineVideoNode.id ? { ...node, status: "running" } : node) }));
             try {
               const { invoke } = await import("@tauri-apps/api/core");
-              setMessage(selectedImageReference
-                ? `万相正在使用 ${mentionedReference ? `@图片${references.indexOf(selectedImageReference) + 1}` : `连接图片“${selectedImageReference.name}”`} 作为首帧${linkedTextInputs.length ? `，并合并 ${linkedTextInputs.length} 个文本输入` : ""}…`
-                : `万相正在提交“${requestModel}”文生视频任务${linkedTextInputs.length ? `，已合并 ${linkedTextInputs.length} 个文本输入` : ""}。`);
-              const result = await invoke<{ task_id: string; request_id?: string; video_url: string }>("generate_alibaba_wan_video", {
+              setMessage(selectedImageReferences.length
+                ? `${providerShortName}正在使用 ${selectedImageReferences.length} 张参考图生成视频${linkedTextInputs.length ? `，并合并 ${linkedTextInputs.length} 个文本输入` : ""}…`
+                : `${providerShortName}正在提交“${requestModel}”文生视频任务${linkedTextInputs.length ? `，已合并 ${linkedTextInputs.length} 个文本输入` : ""}。`);
+              const result = await invoke<{ task_id: string; request_id?: string; video_url: string }>("generate_provider_video", {
+                provider: config.provider,
                 endpoint: providerConfig.endpoint,
                 apiKey: providerConfig.apiKey,
+                apiSecret: providerConfig.apiSecret || null,
                 model: requestModel,
                 prompt,
+                mode: config.mode || "text",
                 ratio: config.ratio || "16:9",
                 quality: config.quality || "720P",
                 duration: config.duration || 5,
                 audio: config.audio !== false,
-                imageUrl: selectedImageReference?.src || null,
+                imageUrls: selectedImageReferences.map((item) => item.src),
               });
               const [generatedWidth, generatedHeight] = onlineVideoSizeForRatio(config.ratio);
               const generated: NodeItem = {
                 id: newId(), kind: "video", x: activeOnlineVideoNode.x + activeOnlineVideoNode.width + 80, y: activeOnlineVideoNode.y,
-                width: generatedWidth, height: generatedHeight + 29, name: `万相-${result.task_id}.mp4`, fileName: `万相-${result.task_id}.mp4`, src: result.video_url, createdAt: Date.now(),
+                width: generatedWidth, height: generatedHeight + 29, name: `${providerShortName}-${result.task_id}.mp4`, fileName: `${providerShortName}-${result.task_id}.mp4`, src: result.video_url, createdAt: Date.now(),
               };
               setRecent((items) => [generated, ...items]);
               setRecentOpen(true);
@@ -3742,12 +3790,12 @@ setPanning(false);
                 ],
                 links: [...p.links, { id: newId(), from: activeOnlineVideoNode.id, to: generated.id }],
               }));
-              setMessage("万相视频生成成功，已创建独立视频素材节点并连接到 AI 视频节点。");
+              setMessage(`${providerShortName}视频生成成功，已创建独立视频素材节点并连接到 AI 视频节点。`);
             } catch (error) {
               const detail = String(error).replace(/^Error: /, "");
-              addLog(`阿里百炼·万相：${detail}`);
+              addLog(`${config.provider}：${detail}`);
               change((p) => ({ ...p, nodes: p.nodes.map((node) => node.id === activeOnlineVideoNode.id ? { ...node, status: "error" } : node) }));
-              setMessage(`万相生成失败：${detail}`);
+              setMessage(`${providerShortName}生成失败：${detail}`);
             }
             return;
           }
@@ -3809,9 +3857,15 @@ setPanning(false);
           <div className="online-video-consolebar">
             {source === "byok" && <select aria-label="平台" value={config.provider} onChange={(event) => {
               const provider = event.target.value;
-              const models = (onlineProviderConfigs[provider]?.detectedModels || []).filter((model) => model.kind === "video");
+              const saved = onlineProviderConfigs[provider];
+              const defaults = ONLINE_PROVIDER_DEFAULTS[provider];
+              const providerConfig = saved ? { ...defaults, ...saved } : defaults;
+              const models = (providerConfig?.detectedModels || []).filter((model) => model.kind === "video");
               const model = models.find((item) => item.modes?.includes(cloudMode)) || models[0];
-              update({ provider, ...(model ? { model: model.id, mode: model.modes?.includes(cloudMode) ? cloudMode : model.modes?.[0] || cloudMode } : {}) });
+              const selectedModel = providerConfig?.model && !models.some((item) => item.id === providerConfig.model)
+                ? { ...classifyProviderModel(providerConfig.model), modes: models[0]?.modes }
+                : model;
+              update({ provider, ...(selectedModel ? { model: selectedModel.id, mode: selectedModel.modes?.includes(cloudMode) ? cloudMode : selectedModel.modes?.[0] || cloudMode } : {}) });
             }}><option>未选择平台</option>{onlineProviderNames.map((provider) => <option key={provider}>{provider}</option>)}</select>}
             {source === "byok" && byokModels.length > 0 && <select className="cloud-video-model-select" aria-label="自带密钥视频模型" title={byokModel?.purpose} value={byokModel?.id || ""} onChange={(event) => {
               const model = byokModels.find((item) => item.id === event.target.value);
