@@ -477,6 +477,95 @@ async fn generate_openai_image_edit(
     Err("图生图接口没有返回图片数据".into())
 }
 
+#[tauri::command]
+async fn generate_google_image(
+    endpoint: String,
+    api_key: String,
+    prompt: String,
+    model: String,
+    ratio: String,
+    resolution: String,
+    image_data: Vec<String>,
+) -> Result<String, String> {
+    let endpoint = endpoint.trim().trim_end_matches('/');
+    let base = if endpoint.ends_with("/v1") || endpoint.ends_with("/v1beta") {
+        endpoint.to_string()
+    } else {
+        format!("{endpoint}/v1beta")
+    };
+    let model = model.trim().trim_start_matches("models/");
+    let mut parts = vec![serde_json::json!({"text": prompt})];
+    for data_url in image_data.into_iter().take(14) {
+        let (header, encoded) = data_url
+            .split_once(',')
+            .ok_or_else(|| "Nano Banana 参考图不是有效的 Data URL".to_string())?;
+        let mime_type = header
+            .strip_prefix("data:")
+            .and_then(|value| value.split(';').next())
+            .unwrap_or("image/png");
+        parts.push(serde_json::json!({
+            "inlineData": { "mimeType": mime_type, "data": encoded }
+        }));
+    }
+    let image_size = match resolution.as_str() {
+        "4096" | "4K" => "4K",
+        "2048" | "2K" => "2K",
+        _ => "1K",
+    };
+    let mut generation_config = serde_json::json!({
+        "responseModalities": ["IMAGE"],
+        "imageConfig": { "aspectRatio": ratio }
+    });
+    if model.contains("gemini-3") && !model.contains("flash-lite") {
+        generation_config["imageConfig"]["imageSize"] = serde_json::Value::String(image_size.to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|error| format!("创建 Nano Banana 网络请求失败：{error}"))?;
+    let response = client
+        .post(format!("{base}/models/{model}:generateContent"))
+        .header("x-goog-api-key", api_key.trim())
+        .json(&serde_json::json!({
+            "contents": [{ "parts": parts }],
+            "generationConfig": generation_config
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("无法连接 Gemini API：{error}"))?;
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("无法读取 Gemini API 响应：{error}"))?;
+    if !status.is_success() {
+        let message = body
+            .pointer("/error/message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("请求被 Google 拒绝");
+        return Err(format!("Nano Banana 生成失败（HTTP {status}）：{message}"));
+    }
+    let response_parts = body
+        .pointer("/candidates/0/content/parts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("Nano Banana 没有返回候选图片：{body}"))?;
+    for part in response_parts.iter().rev() {
+        let encoded = part
+            .pointer("/inlineData/data")
+            .or_else(|| part.pointer("/inline_data/data"))
+            .and_then(serde_json::Value::as_str);
+        if let Some(encoded) = encoded {
+            let mime_type = part
+                .pointer("/inlineData/mimeType")
+                .or_else(|| part.pointer("/inline_data/mime_type"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("image/png");
+            return Ok(format!("data:{mime_type};base64,{encoded}"));
+        }
+    }
+    Err("Nano Banana 返回了文本，但没有返回图片数据".into())
+}
+
 // 阿里云百炼（DashScope）万相视频采用异步任务协议：先创建任务，再查询任务状态。
 // 放在 Rust 侧调用可以绕过 WebView 的跨域限制，同时 API Key 不会暴露到前端日志中。
 #[tauri::command]
@@ -1156,6 +1245,7 @@ fn main() {
             describe_openai_image,
             generate_openai_image_edit,
             generate_openai_image,
+            generate_google_image,
             generate_alibaba_wan_video,
             generate_provider_video,
             rewrite_alibaba_prompt,

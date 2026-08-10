@@ -110,6 +110,16 @@ const ONLINE_PROVIDER_DEFAULTS: Record<string, Omit<OnlineProviderConfig, "apiKe
       { id: "doubao-seedance-1-0-pro-250528", kind: "video", modes: ["text", "image", "reference"], purpose: "视频 · 文生视频 / 图生视频 / 多图参考" },
     ],
   },
+  "Google Nano Banana": {
+    endpoint: "https://generativelanguage.googleapis.com/v1beta",
+    model: "gemini-3.1-flash-image",
+    detectedModels: [
+      { id: "gemini-3.1-flash-image", kind: "image", purpose: "图片生成 / 多图参考 / 最高 4K" },
+      { id: "gemini-3.1-flash-lite-image", kind: "image", purpose: "低成本快速图片生成 / 1K" },
+      { id: "gemini-3-pro-image", kind: "image", purpose: "专业图片生成 / 精准文字 / 最高 4K" },
+      { id: "gemini-2.5-flash-image", kind: "image", purpose: "旧版 Nano Banana / 低延迟 1K" },
+    ],
+  },
   "腾讯混元": { endpoint: "https://hunyuan.tencentcloudapi.com", model: "HunyuanVideo" },
   "MiniMax Hailuo": { endpoint: "https://api.minimaxi.com", model: "video-01" },
   "fal.ai": { endpoint: "https://fal.run", model: "fal-ai/wan-i2v" },
@@ -128,7 +138,7 @@ const classifyProviderModel = (id: string): DetectedProviderModel => {
     else if (/t2v/.test(value)) modes = ["text"];
     return { id, kind: "video", modes, purpose: modes.length ? `视频 · ${modes.map((mode) => CLOUD_VIDEO_MODE_LABELS[mode]).join(" / ")}` : "视频模型 · 具体输入能力待平台确认" };
   }
-  if (/seedream|gpt-image|image[-_.]?\d|flux|stable[-_.]?diffusion|sdxl|wan.*image/.test(value)) return { id, kind: "image", purpose: "图片生成 / 图片编辑" };
+  if (/seedream|gpt-image|gemini.*image|nano[-_.]?banana|image[-_.]?\d|flux|stable[-_.]?diffusion|sdxl|wan.*image/.test(value)) return { id, kind: "image", purpose: "图片生成 / 图片编辑" };
   if (/gpt|qwen|claude|deepseek|gemini|minimax[-_.]?m|llama|mistral|chat|text/.test(value)) return { id, kind: "text", purpose: "文本、对话或剧本生成" };
   return { id, kind: "unknown", purpose: "用途待确认，不会自动用于生成" };
 };
@@ -515,6 +525,12 @@ export default function App() {
     ? { ...ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider], ...onlineProviderConfigs[onlineConfigProvider] }
     : { ...ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider], apiKey: "" };
   const onlineProviderNames = [...new Set([...Object.keys(ONLINE_PROVIDER_DEFAULTS), ...Object.keys(onlineProviderConfigs)])];
+  const onlineVideoProviderNames = onlineProviderNames.filter((provider) => {
+    const saved = onlineProviderConfigs[provider];
+    const defaults = ONLINE_PROVIDER_DEFAULTS[provider];
+    const models = (saved ? { ...defaults, ...saved } : defaults)?.detectedModels || [];
+    return models.length === 0 || models.some((model) => model.kind === "video");
+  });
   const updateOnlineProviderConfig = (patch: Partial<OnlineProviderConfig>) => {
     setOnlineProviderConfigs((current) => {
       const base = current[onlineConfigProvider]
@@ -2306,13 +2322,27 @@ setPanning(false);
       return;
     }
     const textConnection = node.kind === "aiText" ? getAiTextProviderConnection(settings as AiTextSettings) : null;
+    const imageSettings = node.kind === "aiImage" ? settings as AiImageSettings : null;
+    const imageProvider = imageSettings?.provider || "OpenAI";
+    const savedGoogleConfig = onlineProviderConfigs["Google Nano Banana"];
+    const googleDefaults = ONLINE_PROVIDER_DEFAULTS["Google Nano Banana"];
+    const googleConfig = savedGoogleConfig ? { ...googleDefaults, ...savedGoogleConfig } : undefined;
     if (node.kind === "aiText" && !textConnection?.apiKey) {
       requestAiTextProviderConfiguration(textConnection?.provider || "OpenAI");
       return;
     }
-    if (node.kind === "aiImage" && (!openAiConfig.endpoint || !openAiConfig.apiKey)) {
+    if (node.kind === "aiImage" && imageProvider === "Google Nano Banana" && (!googleConfig?.endpoint || !googleConfig.apiKey)) {
+      openOnlineConfiguration("byok", "Google Nano Banana");
+      setMessage("请先填写 Google AI Studio 的 Gemini API Key。");
+      return;
+    }
+    if (node.kind === "aiImage" && imageProvider === "OpenAI" && (!openAiConfig.endpoint || !openAiConfig.apiKey)) {
       configureOpenAi();
       setMessage("请先填写 OpenAI 兼容接口地址和 API Key。");
+      return;
+    }
+    if (node.kind === "aiImage" && !["OpenAI", "Google Nano Banana", "Midjourney（手动命令）"].includes(imageProvider)) {
+      setMessage(`“${imageProvider}”尚未完成图片生成协议适配，请切换到 OpenAI、Google Nano Banana 或 Midjourney 手动命令。`);
       return;
     }
     change((current) => ({ ...current, nodes: current.nodes.map((item) => item.id === node.id ? { ...item, status: "running" } : item) }));
@@ -2343,41 +2373,59 @@ setPanning(false);
         change((current) => ({ ...current, nodes: [...current.nodes.map((item) => item.id === node.id ? { ...item, status: "done" } : item), output], links: [...current.links, { id: newId(), from: node.id, to: output.id }] }));
         setMessage("完整剧本已生成并连接到画布");
       } else {
-        const imageSettings = settings as AiImageSettings;
-        const fullPrompt = [effectivePrompt, `视觉风格：${imageSettings.style || "电影写实"}`, imageSettings.negativePrompt ? `避免：${imageSettings.negativePrompt}` : ""].filter(Boolean).join("\n");
-        const references = [...upstreamImages, ...(imageSettings.references || []).filter((reference) => !upstreamImages.some((item) => item.id === reference.id))];
-        const reference = references[0];
-        let referenceData = reference?.src || "";
-        if (referenceData && !referenceData.startsWith("data:")) {
-          const blob = await fetch(referenceData).then((response) => {
+        const currentImageSettings = imageSettings!;
+        const fullPrompt = [effectivePrompt, `视觉风格：${currentImageSettings.style || "电影写实"}`, currentImageSettings.negativePrompt ? `避免：${currentImageSettings.negativePrompt}` : ""].filter(Boolean).join("\n");
+        const references = [...upstreamImages, ...(currentImageSettings.references || []).filter((reference) => !upstreamImages.some((item) => item.id === reference.id))];
+        if (imageProvider === "Midjourney（手动命令）") {
+          const command = `/imagine prompt: ${fullPrompt.replace(/\s+/g, " ").trim()} --ar ${currentImageSettings.ratio || "1:1"}`;
+          try { await navigator.clipboard.writeText(command); } catch { /* Clipboard permissions can be denied; the text node remains available. */ }
+          const output: NodeItem = { id: newId(), kind: "text", x: node.x + node.width + 90, y: node.y, width: 520, height: 220, name: "Midjourney 手动命令", text: command, status: "done", createdAt: Date.now() };
+          change((current) => ({ ...current, nodes: [...current.nodes.map((item) => item.id === node.id ? { ...item, status: "done" } : item), output], links: [...current.links, { id: newId(), from: node.id, to: output.id }] }));
+          setMessage("Midjourney 官方未开放公共 API；已生成安全的手动命令并尝试复制，请到官方网页或 Discord 提交后导回结果。");
+          return;
+        }
+        const toDataUrl = async (source: string) => {
+          if (!source || source.startsWith("data:")) return source;
+          const blob = await fetch(source).then((response) => {
             if (!response.ok) throw new Error(`无法读取参考图：HTTP ${response.status}`);
             return response.blob();
           });
-          referenceData = await new Promise<string>((resolve, reject) => {
+          return await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(String(reader.result || ""));
             reader.onerror = () => reject(reader.error || new Error("参考图读取失败"));
             reader.readAsDataURL(blob);
           });
-        }
-        const src = referenceData
+        };
+        const referenceData = await Promise.all(references.slice(0, 14).map((reference) => toDataUrl(reference.src)));
+        const src = imageProvider === "Google Nano Banana"
+          ? await invoke<string>("generate_google_image", {
+              endpoint: googleConfig!.endpoint,
+              apiKey: googleConfig!.apiKey,
+              prompt: fullPrompt,
+              model: currentImageSettings.model || googleConfig!.model || "gemini-3.1-flash-image",
+              ratio: currentImageSettings.ratio || "1:1",
+              resolution: currentImageSettings.resolution || "1024",
+              imageData: referenceData.filter(Boolean),
+            })
+          : referenceData[0]
           ? await invoke<string>("generate_openai_image_edit", {
               endpoint: openAiConfig.endpoint,
               apiKey: openAiConfig.apiKey,
               prompt: fullPrompt,
-              model: imageSettings.model || "gpt-image-1",
-              imageData: referenceData,
+              model: currentImageSettings.model || "gpt-image-1",
+              imageData: referenceData[0],
             })
           : await invoke<string>("generate_openai_image", {
               endpoint: openAiConfig.endpoint,
               apiKey: openAiConfig.apiKey,
               prompt: fullPrompt,
-              model: imageSettings.model || "gpt-image-1",
+              model: currentImageSettings.model || "gpt-image-1",
             });
         const [width, height] = nodeSize.image;
         const output: NodeItem = { id: newId(), kind: "image", x: node.x + node.width + 90, y: node.y, width, height, name: `AI图片-${Date.now()}.png`, fileName: `AI图片-${Date.now()}.png`, src, status: "done", createdAt: Date.now() };
         change((current) => ({ ...current, nodes: [...current.nodes.map((item) => item.id === node.id ? { ...item, status: "done", src } : item), output], links: [...current.links, { id: newId(), from: node.id, to: output.id }] }));
-        setMessage(`图片已生成并连接到画布${upstreamText.length ? `；已合并 ${upstreamText.length} 个文本输入` : ""}${reference ? `；已使用参考图“${reference.name}”` : ""}`);
+        setMessage(`${imageProvider === "Google Nano Banana" ? "Nano Banana" : "OpenAI"} 图片已生成并连接到画布${upstreamText.length ? `；已合并 ${upstreamText.length} 个文本输入` : ""}${references.length ? `；已使用 ${Math.min(references.length, 14)} 张参考图` : ""}`);
       }
     } catch (error) {
       change((current) => ({ ...current, nodes: current.nodes.map((item) => item.id === node.id ? { ...item, status: "error" } : item) }));
@@ -2571,14 +2619,14 @@ setPanning(false);
               <label>接口地址
                 <input value={selectedOnlineProvider.endpoint} onChange={(event) => updateOnlineProviderConfig({ endpoint: event.target.value })} />
               </label>
-              <label>{onlineConfigProvider === "可灵 Kling" ? "Access Key" : "API 密钥"}
-                <input type="password" value={selectedOnlineProvider.apiKey} onChange={(event) => updateOnlineProviderConfig({ apiKey: event.target.value })} placeholder={onlineConfigProvider === "可灵 Kling" ? "粘贴可灵 Access Key" : "粘贴平台 API Key"} />
+              <label>{onlineConfigProvider === "可灵 Kling" ? "Access Key" : onlineConfigProvider === "Google Nano Banana" ? "Gemini API Key" : "API 密钥"}
+                <input type="password" value={selectedOnlineProvider.apiKey} onChange={(event) => updateOnlineProviderConfig({ apiKey: event.target.value })} placeholder={onlineConfigProvider === "可灵 Kling" ? "粘贴可灵 Access Key" : onlineConfigProvider === "Google Nano Banana" ? "粘贴 Google AI Studio 的 Gemini API Key" : "粘贴平台 API Key"} />
               </label>
               {onlineConfigProvider === "可灵 Kling" && <label>Secret Key
                 <input type="password" value={selectedOnlineProvider.apiSecret || ""} onChange={(event) => updateOnlineProviderConfig({ apiSecret: event.target.value })} placeholder="粘贴可灵 Secret Key（只保存在本机）" />
               </label>}
-              {onlineConfigProvider === "可灵 Kling" || onlineConfigProvider === "豆包·火山方舟"
-                ? <div className="provider-model-discovery"><small>该平台使用专用视频协议，已内置模型用途识别；也可在下面填写控制台实际开通的模型 ID。</small></div>
+              {["可灵 Kling", "豆包·火山方舟", "Google Nano Banana"].includes(onlineConfigProvider)
+                ? <div className="provider-model-discovery"><small>{onlineConfigProvider === "Google Nano Banana" ? "该平台使用 Gemini 图片协议，已内置图片模型、分辨率与多图参考能力识别。" : "该平台使用专用视频协议，已内置模型用途识别；也可在下面填写控制台实际开通的模型 ID。"}</small></div>
                 : <div className="provider-model-discovery"><button disabled={discoveringModels || !selectedOnlineProvider.endpoint?.trim()} onClick={() => void discoverProviderModels()}>{discoveringModels ? "正在读取模型…" : "自动读取并识别模型"}</button><small>适用于提供 OpenAI 兼容 `/models` 接口的平台；密钥只在本机请求时使用。</small></div>}
               <label>默认模型
                 <input list="online-provider-model-options" value={selectedOnlineProvider.model} onChange={(event) => updateOnlineProviderConfig({ model: event.target.value })} placeholder="填写控制台中的模型 ID" />
@@ -3218,7 +3266,7 @@ setPanning(false);
                       update({ provider, model: providerConfig?.model, ...(model?.modes?.length ? { mode: model.modes[0] } : {}) });
                     }}>
                       <option>未选择平台</option>
-                      {onlineProviderNames.map((provider) => <option key={provider}>{provider}</option>)}
+                      {onlineVideoProviderNames.map((provider) => <option key={provider}>{provider}</option>)}
                     </select>
                     <select value={config.mode} onChange={(event) => update({ mode: event.target.value as OnlineVideoSettings["mode"] })}>
                       {Object.entries(modeLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
@@ -3866,7 +3914,7 @@ setPanning(false);
                 ? { ...classifyProviderModel(providerConfig.model), modes: models[0]?.modes }
                 : model;
               update({ provider, ...(selectedModel ? { model: selectedModel.id, mode: selectedModel.modes?.includes(cloudMode) ? cloudMode : selectedModel.modes?.[0] || cloudMode } : {}) });
-            }}><option>未选择平台</option>{onlineProviderNames.map((provider) => <option key={provider}>{provider}</option>)}</select>}
+            }}><option>未选择平台</option>{onlineVideoProviderNames.map((provider) => <option key={provider}>{provider}</option>)}</select>}
             {source === "byok" && byokModels.length > 0 && <select className="cloud-video-model-select" aria-label="自带密钥视频模型" title={byokModel?.purpose} value={byokModel?.id || ""} onChange={(event) => {
               const model = byokModels.find((item) => item.id === event.target.value);
               update({ model: event.target.value, mode: model?.modes?.length && !model.modes.includes(cloudMode) ? model.modes[0] : cloudMode });

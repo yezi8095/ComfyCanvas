@@ -46,6 +46,14 @@ SHA256 1128471E5CCF6A08FD4DCCE8791B123495A831F704AC9F9F5DF0023F774A2F3D
 
 在 AI 视频节点中选择“自带 API Key”后，平台、模型与生成模式会按能力联动。可灵当前接入文生视频和单图生视频；豆包当前接入文生视频、图生视频与多图参考。平台密钥只保存在当前电脑的应用本地配置中，不随项目文件或 Git 仓库上传。
 
+## 已适配的在线图片 API
+
+- OpenAI Images：支持文生图和单张参考图编辑。
+- Google Nano Banana：通过 Gemini API 接入 Nano Banana 2、Lite、Pro 与旧版 2.5；支持文生图和最多 14 张参考图。Lite 与旧版 2.5 会自动锁定 1K，其他 Gemini 3 图片模型可选 1K、2K、4K。
+- Midjourney：由于官方没有面向普通用户开放公共 API，应用只生成并复制官方 `/imagine` 手动命令，不执行非官方 Discord 自动化；生成完成后可将图片导回画布。
+
+Nano Banana 的 Gemini API Key 在“在线服务配置”中填写，只保存在当前电脑。Midjourney 手动命令模式不需要在应用里保存 Discord 凭据。
+
 ## 未纳入仓库的内容
 
 - `node_modules/`、`dist/`、`target*/`：依赖与构建缓存，可重新生成

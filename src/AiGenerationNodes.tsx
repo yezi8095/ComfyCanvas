@@ -23,6 +23,21 @@ export const AI_TEXT_PROVIDER_PRESETS = {
   },
 } as const;
 
+export const AI_IMAGE_PROVIDER_PRESETS = {
+  OpenAI: {
+    models: ["gpt-image-1", "gpt-image-1-mini"],
+    defaultModel: "gpt-image-1",
+  },
+  "Google Nano Banana": {
+    models: ["gemini-3.1-flash-image", "gemini-3.1-flash-lite-image", "gemini-3-pro-image", "gemini-2.5-flash-image"],
+    defaultModel: "gemini-3.1-flash-image",
+  },
+  "Midjourney（手动命令）": {
+    models: ["V8.1"],
+    defaultModel: "V8.1",
+  },
+} as const;
+
 export type AiReferenceImage = {
   id: string;
   name: string;
@@ -138,6 +153,7 @@ export function AiGenerationComposer({
     ratio: "16:9", resolution: "1024", amount: 1, style: "电影写实", seed: -1, guidance: 7,
     ...storedImage,
   };
+  const imageSupportsHighResolution = !/gemini-3\.1-flash-lite-image|gemini-2\.5-flash-image/i.test(image.model);
   const config = isText ? text : image;
   const update = (patch: Record<string, unknown>) => onUpdate({ ...config, ...patch });
   const cloudKind: CloudModelKind = isText ? "text" : "image";
@@ -329,10 +345,20 @@ export function AiGenerationComposer({
         if (isText) {
           const preset = AI_TEXT_PROVIDER_PRESETS[provider as keyof typeof AI_TEXT_PROVIDER_PRESETS];
           update({ provider, model: preset?.defaultModel || text.model });
-        } else update({ provider });
+        } else {
+          const preset = AI_IMAGE_PROVIDER_PRESETS[provider as keyof typeof AI_IMAGE_PROVIDER_PRESETS];
+          const model = preset?.defaultModel || image.model;
+          update({ provider, model, ...(/gemini-3\.1-flash-lite-image|gemini-2\.5-flash-image/i.test(model) ? { resolution: "1024" } : {}) });
+        }
       }}>
         {isText ? <><option>OpenAI</option><option>阿里百炼·通义千问</option><option>MiniMax</option></>
-          : <><option>OpenAI</option><option>阿里百炼·万相</option><option>fal.ai</option><option>本地 ComfyUI</option></>}
+          : <><option>OpenAI</option><option>Google Nano Banana</option><option>Midjourney（手动命令）</option></>}
+      </select>}
+      {!isText && config.source === "byok" && <select aria-label="图片模型" value={image.model} onChange={(event) => {
+        const model = event.target.value;
+        update({ model, ...(/gemini-3\.1-flash-lite-image|gemini-2\.5-flash-image/i.test(model) ? { resolution: "1024" } : {}) });
+      }}>
+        {(AI_IMAGE_PROVIDER_PRESETS[image.provider as keyof typeof AI_IMAGE_PROVIDER_PRESETS]?.models || [image.model]).map((model) => <option key={model}>{model}</option>)}
       </select>}
       {!isText && <select aria-label="图片生成模式" value={image.mode} onChange={(event) => update({ mode: event.target.value })}>
         <option value="text">文生图</option><option value="image">图生图</option>
@@ -367,7 +393,12 @@ export function AiGenerationComposer({
               <option key={model}>{model}</option>,
             )}
           </select>
-        : <input value={config.model} onChange={(event) => update({ model: event.target.value })} />}</label>
+        : <select value={image.model} onChange={(event) => {
+            const model = event.target.value;
+            update({ model, ...(/gemini-3\.1-flash-lite-image|gemini-2\.5-flash-image/i.test(model) ? { resolution: "1024" } : {}) });
+          }}>
+            {(AI_IMAGE_PROVIDER_PRESETS[image.provider as keyof typeof AI_IMAGE_PROVIDER_PRESETS]?.models || [image.model]).map((model) => <option key={model}>{model}</option>)}
+          </select>}</label>
       {isText ? <>
         <label>题材<select value={text.genre} onChange={(event) => update({ genre: event.target.value })}><option>剧情短片</option><option>电影长片</option><option>短剧</option><option>广告片</option><option>纪录片</option><option>动画</option></select></label>
         <label>输出格式<select value={text.format} onChange={(event) => update({ format: event.target.value })}><option>标准影视剧本</option><option>分场剧本</option><option>文学剧本</option><option>短剧脚本</option></select></label>
@@ -382,7 +413,7 @@ export function AiGenerationComposer({
         <label className="ai-check"><input type="checkbox" checked={text.includeStoryboard} onChange={(event) => update({ includeStoryboard: event.target.checked })} />附分镜建议</label>
       </> : <>
         <label>画面比例<select value={image.ratio} onChange={(event) => update({ ratio: event.target.value })}><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option></select></label>
-        <label>分辨率<select value={image.resolution} onChange={(event) => update({ resolution: event.target.value })}><option value="1024">1K</option><option value="2048">2K</option><option value="4096">4K</option></select></label>
+        <label title={imageSupportsHighResolution ? "当前模型支持高分辨率输出" : "当前模型仅支持 1K，已自动锁定"}>分辨率<select value={image.resolution} disabled={!imageSupportsHighResolution} onChange={(event) => update({ resolution: event.target.value })}><option value="1024">1K</option><option value="2048">2K</option><option value="4096">4K</option></select></label>
         <label>生成数量<select value={image.amount} onChange={(event) => update({ amount: Number(event.target.value) })}><option value="1">1 张</option><option value="2">2 张</option><option value="4">4 张</option></select></label>
         <label>视觉风格<select value={image.style} onChange={(event) => update({ style: event.target.value })}><option>电影写实</option><option>商业摄影</option><option>概念设计</option><option>日系动画</option><option>水彩插画</option><option>3D 渲染</option></select></label>
         <label>随机种子<input type="number" value={image.seed} onChange={(event) => update({ seed: Number(event.target.value) })} /></label>
