@@ -1,0 +1,25 @@
+{
+  "__ymProjectPackage": 2,
+  "projectName": "桌面验收-最小项目",
+  "schemaVersion": 3,
+  "nodes": [
+    {
+      "id": "fixture-text-1",
+      "kind": "text",
+      "x": 120,
+      "y": 100,
+      "width": 360,
+      "height": 220,
+      "name": "验收提示词",
+      "text": "这是不含隐私的离线验收项目。",
+      "createdAt": 0
+    }
+  ],
+  "links": [],
+  "groups": [],
+  "view": {
+    "x": 80,
+    "y": 60,
+    "zoom": 1
+  }
+}

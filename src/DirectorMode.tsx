@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -8,6 +9,19 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import {
+  directorAssetsForStorage,
+  isSessionOnlyDirectorSource,
+  readJson,
+  writeJson,
+} from "./core/director/persistence";
+import { getPreviewFrame, getTimelineBounds } from "./core/director/layout";
+import {
+  DesktopMediaStoreUnavailableError,
+  uploadWorkspaceAsset,
+  type ManagedWorkspaceAsset,
+} from "./core/assets/workspaceAssetClient";
+import { cleanupUnattachedWorkspaceAsset } from "./core/assets/workspaceAssetLifecycle";
 
 type Kind = "image" | "video" | "audio" | "text" | "storyboard" | "api" | "batch" | "aiText" | "aiImage" | "onlineVideo";
 type Node = { id: string; kind: Kind; name: string; src?: string; localPath?: string; text?: string; mediaWidth?: number; mediaHeight?: number };
@@ -30,10 +44,19 @@ type Data = {
 };
 type DirectorAsset = {
   id: string;
+  /** Stable id assigned by the managed desktop-media store.  It intentionally
+   * remains separate from the shelf id so old browser-only imports can still
+   * be read without pretending that they are durable. */
+  assetId?: string;
   kind: "image" | "video" | "audio";
   name: string;
   source?: "canvas" | "external";
   src?: string;
+  /** Absolute path returned only by the desktop media store.  It is resolved
+   * to a WebView-safe URL at render time, never copied into localStorage. */
+  localPath?: string;
+  /** FileReader/blob sources are deliberately kept only in the live session. */
+  sessionOnly?: boolean;
   groupId?: string;
   groupName?: string;
   mediaWidth?: number;
@@ -44,6 +67,7 @@ type ContextMenu = Selection & { x: number; y: number };
 type TimelineDragPreview = { selection: Selection; selections: Selection[]; trackId: string; start: number };
 type ExportFormat = "mp4" | "mov";
 type ExportResolution = "720p" | "1080p";
+type LoadResult<T> = { value: T; warning?: string; readFailed?: boolean };
 
 const LEGACY_STORE = "ym-director-editor-v2";
 const STORE_VERSION = "ym-director-editor-v3";
@@ -56,8 +80,6 @@ const TIMELINE_LABEL_WIDTH = 52;
 const MAX_TRACKS_PER_KIND = 5;
 const MIN_CLIP_DURATION = 0.25;
 const DEFAULT_CLIP_DURATION = 5;
-const EMPTY_TIMELINE_DURATION = 30;
-const EDIT_TAIL_SECONDS = 30;
 const BASE_TRACKS: Array<TrackInfo & { id: "video-main" | "audio-main" | "text-main" }> = [
   { id: "video-main", kind: "video", name: "视频 1" },
   { id: "audio-main", kind: "audio", name: "音频 1" },
@@ -67,6 +89,13 @@ const baseTrackId = (kind: TrackKind) => kind === "video" ? "video-main" : kind 
 const trackLabel = (kind: TrackKind) => kind === "video" ? "视频" : kind === "audio" ? "音频" : "文本";
 
 const id = () => globalThis.crypto?.randomUUID?.() || String(Date.now()) + "-" + Math.random();
+/** Rust accepts a deliberately narrow asset identifier.  Unlike the generic
+ * UI id fallback, this cannot accidentally include a decimal point. */
+const managedAssetId = () => {
+  const random = globalThis.crypto?.randomUUID?.().replace(/[^A-Za-z0-9_-]/g, "")
+    || `${Date.now()}${Math.random().toString(36).slice(2)}`.replace(/[^A-Za-z0-9_-]/g, "");
+  return `director_${random || Date.now()}`.slice(0, 128);
+};
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const number = (value: unknown, fallback: number) => typeof value === "number" && Number.isFinite(value) ? value : fallback;
 /** Canvas projects made before Director Mode stored a native localPath instead
@@ -272,14 +301,21 @@ function emptyData(): Data {
   return { script: "", timeline: [], audio: [], textTrack: [], tracks: [], trackEnabled: {}, videoMuted: false };
 }
 
-function read(projectId: string): Data {
+function read(projectId: string): LoadResult<Data> {
   try {
     const scoped = localStorage.getItem(storeKey(projectId));
     // 只迁移一次旧的全局导演台内容，之后每个画布项目都拥有独立时间线。
     const legacy = scoped || localStorage.getItem(MIGRATION_KEY)
       ? null
       : localStorage.getItem(LEGACY_STORE);
-    if (legacy) localStorage.setItem(MIGRATION_KEY, "1");
+    let warning: string | undefined;
+    if (legacy) {
+      try {
+        localStorage.setItem(MIGRATION_KEY, "1");
+      } catch {
+        warning = "旧导演台内容已读入，但无法写入迁移标记；请在清理浏览器存储空间后点击“重试保存”。";
+      }
+    }
     const parsed: unknown = JSON.parse(scoped || legacy || "{}");
     const stored = parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? parsed as Record<string, unknown>
@@ -288,27 +324,36 @@ function read(projectId: string): Data {
     const audio = packByTrack(normalizeAudio(stored.audio));
     const textTrack = packByTrack(normalizeText(stored.textTrack));
     return {
-      script: typeof stored.script === "string" ? stored.script : "",
-      timeline,
-      audio,
-      textTrack,
-      tracks: normalizeTracks(stored.tracks),
-      trackEnabled: stored.trackEnabled && typeof stored.trackEnabled === "object" && !Array.isArray(stored.trackEnabled)
-        ? stored.trackEnabled as Record<string, boolean>
-        : {},
-      videoMuted: stored.videoMuted === true,
+      value: {
+        script: typeof stored.script === "string" ? stored.script : "",
+        timeline,
+        audio,
+        textTrack,
+        tracks: normalizeTracks(stored.tracks),
+        trackEnabled: stored.trackEnabled && typeof stored.trackEnabled === "object" && !Array.isArray(stored.trackEnabled)
+          ? stored.trackEnabled as Record<string, boolean>
+          : {},
+        videoMuted: stored.videoMuted === true,
+      },
+      warning,
     };
   } catch {
-    return emptyData();
+    return {
+      value: emptyData(),
+      readFailed: true,
+      warning: "无法读取已保存的时间线。为避免覆盖原记录，已暂停自动保存；确认后可点击“重试保存”创建新的时间线。",
+    };
   }
 }
 
-function readAssets(projectId: string): DirectorAsset[] {
+function readAssets(projectId: string): LoadResult<DirectorAsset[]> {
   try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(assetStoreKey(projectId)) || "[]");
-    if (!Array.isArray(parsed)) return [];
+    const loaded = readJson<unknown>(localStorage, assetStoreKey(projectId), []);
+    if (!loaded.ok) throw loaded.error;
+    const parsed = loaded.value;
+    if (!Array.isArray(parsed)) return { value: [] };
     const seen = new Set<string>();
-    return parsed.flatMap((raw): DirectorAsset[] => {
+    const assets = parsed.flatMap((raw): DirectorAsset[] => {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
       const item = raw as Record<string, unknown>;
       const id = typeof item.id === "string" ? item.id : "";
@@ -316,26 +361,54 @@ function readAssets(projectId: string): DirectorAsset[] {
       const kind = item.kind;
       if (!id || seen.has(id) || (kind !== "image" && kind !== "video" && kind !== "audio")) return [];
       seen.add(id);
+      const source = item.source === "external" ? "external" : "canvas";
+      const src = typeof item.src === "string" ? item.src : undefined;
+      const localPath = typeof item.localPath === "string" && item.localPath.trim()
+        ? item.localPath
+        : undefined;
+      const assetId = typeof item.assetId === "string" && item.assetId.trim()
+        ? item.assetId
+        : id;
       return [{
         id,
+        assetId,
         name,
         kind,
-        source: item.source === "external" ? "external" : "canvas",
-        src: typeof item.src === "string" ? item.src : undefined,
+        source,
+        src,
+        localPath,
+        // Old versions may contain a complete Data URL.  Keep it alive for
+        // this open session, then write only its descriptor back to storage.
+        // A desktop managed asset deliberately has no `src` in storage: its
+        // durable localPath is converted to an asset URL when it is rendered.
+        sessionOnly: source === "external" && (
+          item.sessionOnly === true || (!localPath && (!src || isSessionOnlyDirectorSource(src)))
+        ) ? true : undefined,
         groupId: typeof item.groupId === "string" ? item.groupId : undefined,
         groupName: typeof item.groupName === "string" ? item.groupName : undefined,
         mediaWidth: number(item.mediaWidth, 0) || undefined,
         mediaHeight: number(item.mediaHeight, 0) || undefined,
       }];
     });
+    return { value: assets };
   } catch {
-    return [];
+    return {
+      value: [],
+      readFailed: true,
+      warning: "无法读取已保存的素材描述。为避免覆盖原记录，已暂停自动保存；确认后可点击“重试保存”。",
+    };
   }
 }
 
 function timeLabel(value: number) {
   const safe = Math.max(0, value);
   return safe < 60 ? safe.toFixed(1) + "s" : Math.floor(safe / 60) + ":" + String(Math.floor(safe % 60)).padStart(2, "0");
+}
+
+function storageFailureMessage(label: string, stage: "serialize" | "write") {
+  return stage === "serialize"
+    ? `${label}无法序列化，尚未保存。请删减异常内容后重试。`
+    : `${label}未保存：本机存储空间不足或不可用。请释放空间后点击“重试保存”。`;
 }
 
 export default function DirectorMode({
@@ -351,8 +424,23 @@ export default function DirectorMode({
   nodes: Node[];
   onImportFiles: (files: File[]) => void;
 }) {
-  const [data, setData] = useState<Data>(() => read(projectId));
-  const [directorAssets, setDirectorAssets] = useState<DirectorAsset[]>(() => readAssets(projectId));
+  const [initialStorage] = useState(() => {
+    const timeline = read(projectId);
+    const assets = readAssets(projectId);
+    return { timeline, assets };
+  });
+  // `DirectorMode` can remain mounted while App switches projects.  Track the
+  // project that owns the current state explicitly so the old timeline can
+  // never be written into the newly opened project's storage key.
+  const [dataProjectId, setDataProjectId] = useState(projectId);
+  const [data, setData] = useState<Data>(initialStorage.timeline.value);
+  const [directorAssets, setDirectorAssets] = useState<DirectorAsset[]>(initialStorage.assets.value);
+  const [timelineSaveError, setTimelineSaveError] = useState<string | null>(null);
+  const [assetSaveError, setAssetSaveError] = useState<string | null>(null);
+  const [storageRecoveryNotice, setStorageRecoveryNotice] = useState<string | null>(() =>
+    [initialStorage.timeline.warning, initialStorage.assets.warning].filter((notice): notice is string => Boolean(notice)).join(" ") || null,
+  );
+  const [storageRetry, setStorageRetry] = useState(0);
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [selected, setSelected] = useState<Selection | null>(null);
@@ -380,18 +468,31 @@ export default function DirectorMode({
   const [exportFormat, setExportFormat] = useState<ExportFormat>("mp4");
   const [exportFps, setExportFps] = useState(30);
   const [exportResolution, setExportResolution] = useState<ExportResolution>("720p");
-  const [exportDirectory, setExportDirectory] = useState(() => localStorage.getItem("ym-director-export-directory") || "");
+  const [exportDirectory, setExportDirectory] = useState(() => {
+    try { return localStorage.getItem("ym-director-export-directory") || ""; } catch { return ""; }
+  });
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [draggingTrack, setDraggingTrack] = useState<Selection | null>(null);
   const [dragPreview, setDragPreview] = useState<TimelineDragPreview | null>(null);
   const [snapping, setSnapping] = useState(false);
   const [trackChooser, setTrackChooser] = useState(false);
   const [trackMenu, setTrackMenu] = useState<{ trackId: string; x: number; y: number } | null>(null);
-  const [previewAspect, setPreviewAspect] = useState<number | null>(null);
+  // Metadata arrives asynchronously.  Keep it keyed to a clip so the measured
+  // shape of the previous image can never briefly turn the next one into the
+  // wrong preview frame.
+  const [previewAspect, setPreviewAspect] = useState<{ clipId: string; value: number } | null>(null);
   const [assetGroupFilter, setAssetGroupFilter] = useState("all");
   const [assetImportMenu, setAssetImportMenu] = useState(false);
 
   const history = useRef<Data[]>([]);
+  // A damaged record must not be overwritten merely by mounting Director Mode.
+  // The signature changes after an intentional edit, or the user can force a
+  // write with the visible retry button.
+  const storedTimelineSignature = useRef<string | null>(initialStorage.timeline.readFailed ? JSON.stringify(initialStorage.timeline.value) : null);
+  const storedAssetSignature = useRef<string | null>(initialStorage.assets.readFailed ? JSON.stringify(initialStorage.assets.value) : null);
+  const assetPersistenceBlocked = useRef(initialStorage.assets.readFailed);
+  const lastTimelineStorageRetry = useRef(0);
+  const lastAssetStorageRetry = useRef(0);
   const previewRef = useRef<HTMLVideoElement>(null);
   const previewBoxRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -429,6 +530,46 @@ export default function DirectorMode({
     startY: number;
     changed: boolean;
   } | null>(null);
+  const currentDirectorProjectRef = useRef(projectId);
+
+  // Rehydrate director-local state before paint when App changes projects.
+  // The normal persistence effects below are gated by `dataProjectId`, which
+  // prevents a render carrying the old state from overwriting the new project
+  // during this transition.
+  useLayoutEffect(() => {
+    if (dataProjectId === projectId) return;
+    const timeline = read(projectId);
+    const assets = readAssets(projectId);
+    currentDirectorProjectRef.current = projectId;
+    storedTimelineSignature.current = timeline.readFailed ? JSON.stringify(timeline.value) : null;
+    storedAssetSignature.current = assets.readFailed ? JSON.stringify(assets.value) : null;
+    assetPersistenceBlocked.current = assets.readFailed;
+    lastTimelineStorageRetry.current = 0;
+    lastAssetStorageRetry.current = 0;
+    history.current = [];
+    setDataProjectId(projectId);
+    setData(timeline.value);
+    setDirectorAssets(assets.value);
+    setTimelineSaveError(null);
+    setAssetSaveError(null);
+    setStorageRecoveryNotice(
+      [timeline.warning, assets.warning].filter((notice): notice is string => Boolean(notice)).join(" ") || null,
+    );
+    setStorageRetry(0);
+    setTime(0);
+    setPlaying(false);
+    setScrubbing(false);
+    setSelected(null);
+    setSelectedKeys([]);
+    setMenu(null);
+    setTrackMenu(null);
+    setDragPreview(null);
+    dragPreviewRef.current = null;
+    timelineGesture.current = null;
+    setAssetPreview(null);
+    setAssetHoverPreview(null);
+    setAssetGroupFilter("all");
+  }, [dataProjectId, projectId]);
 
   const validNodes = useMemo(
     () => (Array.isArray(nodes) ? nodes.filter((node): node is Node => Boolean(node) && typeof node.id === "string" && Boolean(node.id)) : []),
@@ -437,12 +578,13 @@ export default function DirectorMode({
   const nodeById = useMemo(() => {
     const result = new Map(validNodes.map((node) => [node.id, { ...node, src: sourceForNode(node) }]));
     directorAssets.forEach((asset) => {
-      if (asset.source !== "external" || !asset.src || result.has(asset.id)) return;
+      const src = sourceForNode(asset);
+      if (asset.source !== "external" || !src || result.has(asset.id)) return;
       result.set(asset.id, {
         id: asset.id,
         kind: asset.kind,
         name: asset.name,
-        src: asset.src,
+        src,
         mediaWidth: asset.mediaWidth,
         mediaHeight: asset.mediaHeight,
       });
@@ -488,13 +630,18 @@ export default function DirectorMode({
     return [...groups.values()];
   }, [directorAssets]);
   const shownMedia = assetGroupFilter === "all" ? media : media.filter((node) => node.directorGroup === assetGroupFilter);
+  const sessionOnlyAssets = directorAssets.filter((asset) =>
+    asset.source === "external" && (asset.sessionOnly || isSessionOnlyDirectorSource(asset.src)),
+  );
+  const unavailableSessionAssets = sessionOnlyAssets.filter((asset) => !asset.src);
+  const sessionOnlyAssetIds = new Set(sessionOnlyAssets.map((asset) => asset.id));
+  const unavailableAssetNames = unavailableSessionAssets.slice(0, 3).map((asset) => asset.name).join("、");
   const visualEnd = visibleTimeline.filter((item) => enabledTrack(item.clip.trackId)).reduce((last, item) => Math.max(last, item.end), 0);
   const audioEnd = data.audio.filter((clip) => enabledTrack(clip.trackId)).reduce((last, clip) => Math.max(last, clip.start + clip.duration), 0);
   const textEnd = data.textTrack.filter((clip) => enabledTrack(clip.trackId)).reduce((last, clip) => Math.max(last, clip.start + clip.duration), 0);
   // 成片的长度始终取三条轨道中最晚结束的内容：图片/视频、背景音频、文字。
   // 这样任意一条轨道延长后，时间线和播放终点都会同步延长；没有内容时才保留 5 秒空轨道。
   const sequenceEnd = Math.max(visualEnd, audioEnd, textEnd);
-  const total = sequenceEnd > 0 ? sequenceEnd : EMPTY_TIMELINE_DURATION;
   // The first visible video row is the upper visual layer. Its layer index
   // must therefore be larger than the rows displayed below it.
   const videoTracks = tracksFor("video");
@@ -518,21 +665,18 @@ export default function DirectorMode({
   // Intrinsic media metadata wins over stored dimensions.  Older canvas nodes
   // may carry a stale 16:9 size even when the actual source is portrait.
   const activeAspect = active
-    ? previewAspect ?? (active.node.mediaWidth && active.node.mediaHeight
+    ? (previewAspect?.clipId === active.clip.clipId ? previewAspect.value : null) ?? (active.node.mediaWidth && active.node.mediaHeight
       ? active.node.mediaWidth / active.node.mediaHeight
       : null)
     : null;
-  const previewPortrait = Boolean(activeAspect && activeAspect < 1);
+  const previewFrame = getPreviewFrame(activeAspect);
+  const previewPortrait = previewFrame.portrait;
   // Keep portrait sources in a predictable 9:16 stage.  The source itself
   // still uses `contain`, so it is never cropped when its real ratio differs
   // slightly from 9:16.
-  const previewStyle = previewPortrait && activeAspect
+  const previewStyle = previewFrame.aspectRatio
     ? {
-      aspectRatio: "9 / 16",
-      width: "auto",
-      height: "100%",
-      maxWidth: "100%",
-      maxHeight: "100%",
+      aspectRatio: previewFrame.aspectRatio,
     }
     : undefined;
   const dragPreviewDuration = dragPreview
@@ -543,10 +687,17 @@ export default function DirectorMode({
         : data.textTrack.find((clip) => clip.clipId === dragPreview.selection.id)?.duration || DEFAULT_CLIP_DURATION
     : 0;
   // Playback ends at `total`. The edit area itself follows an active drag and
-  // keeps a generous tail, so the final clip is never an invisible hard stop.
-  const editExtent = Math.max(total, time, dragPreview ? dragPreview.start + dragPreviewDuration : 0);
-  const rulerEnd = Math.ceil(editExtent + EDIT_TAIL_SECONDS);
-  const contentWidth = Math.max(720, Math.ceil((editExtent + EDIT_TAIL_SECONDS) * PPS) + TIMELINE_LABEL_WIDTH + 80);
+  // keeps a generous tail after real material exists. An empty project is
+  // intentionally limited to five seconds rather than looking like a 30s
+  // blank sequence.
+  const timelineBounds = getTimelineBounds(
+    sequenceEnd,
+    time,
+    dragPreview ? dragPreview.start + dragPreviewDuration : 0,
+  );
+  const total = timelineBounds.total;
+  const rulerEnd = timelineBounds.rulerEnd;
+  const contentWidth = Math.max(720, Math.ceil(rulerEnd * PPS) + TIMELINE_LABEL_WIDTH + 80);
 
   const isSelected = (selection: Selection) => selectedKeys.includes(selectionKey(selection));
   const selectSegment = (selection: Selection, additive = false) => {
@@ -694,10 +845,27 @@ export default function DirectorMode({
   };
 
   useEffect(() => {
-    try { localStorage.setItem(storeKey(projectId), JSON.stringify(data)); } catch { }
-  }, [projectId, data]);
+    if (dataProjectId !== projectId) return;
+    let signature: string;
+    try {
+      signature = JSON.stringify(data);
+    } catch {
+      setTimelineSaveError("时间线无法序列化，尚未保存。请删减异常内容后重试。");
+      return;
+    }
+    if (signature === storedTimelineSignature.current && storageRetry === lastTimelineStorageRetry.current) return;
+    lastTimelineStorageRetry.current = storageRetry;
+    const result = writeJson(localStorage, storeKey(projectId), data);
+    if (result.ok) {
+      storedTimelineSignature.current = signature;
+      setTimelineSaveError(null);
+      return;
+    }
+    setTimelineSaveError(storageFailureMessage("时间线", result.stage));
+  }, [dataProjectId, projectId, data, storageRetry]);
 
   useEffect(() => {
+    if (dataProjectId !== projectId) return;
     const next = validNodes
       .filter((node): node is Node & { kind: "image" | "video" | "audio" } =>
       (node.kind === "image" || node.kind === "video" || node.kind === "audio") && Boolean(sourceForNode(node)),
@@ -714,11 +882,30 @@ export default function DirectorMode({
       });
       return unchanged ? previous : merged;
     });
-  }, [validNodes]);
+  }, [dataProjectId, projectId, validNodes]);
 
   useEffect(() => {
-    try { localStorage.setItem(assetStoreKey(projectId), JSON.stringify(directorAssets)); } catch { }
-  }, [projectId, directorAssets]);
+    if (dataProjectId !== projectId) return;
+    const metadata = directorAssetsForStorage(directorAssets);
+    let signature: string;
+    try {
+      signature = JSON.stringify(metadata);
+    } catch {
+      setAssetSaveError("素材描述无法序列化，尚未保存。请移除异常素材后重试。");
+      return;
+    }
+    if (assetPersistenceBlocked.current && storageRetry === lastAssetStorageRetry.current) return;
+    if (signature === storedAssetSignature.current && storageRetry === lastAssetStorageRetry.current) return;
+    lastAssetStorageRetry.current = storageRetry;
+    const result = writeJson(localStorage, assetStoreKey(projectId), metadata);
+    if (result.ok) {
+      storedAssetSignature.current = signature;
+      assetPersistenceBlocked.current = false;
+      setAssetSaveError(null);
+      return;
+    }
+    setAssetSaveError(storageFailureMessage("素材描述", result.stage));
+  }, [dataProjectId, projectId, directorAssets, storageRetry]);
 
   useEffect(() => {
     if (time > total) setTime(total);
@@ -1069,9 +1256,10 @@ export default function DirectorMode({
 
   const queueShelfInsert = (node: Node) => {
     if (assetClickTimer.current !== null) window.clearTimeout(assetClickTimer.current);
+    const targetProjectId = currentDirectorProjectRef.current;
     assetClickTimer.current = window.setTimeout(() => {
       assetClickTimer.current = null;
-      if (!assetWasDragged.current) insertAsset(node.id, time);
+      if (!assetWasDragged.current && currentDirectorProjectRef.current === targetProjectId) insertAsset(node.id, time);
     }, 180);
   };
 
@@ -1214,47 +1402,180 @@ export default function DirectorMode({
     setTextDialog(false);
   };
 
-  const readDirectorFile = (file: File, groupId: string, groupName: string) => new Promise<DirectorAsset | null>((resolve) => {
-    const kind = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : file.type.startsWith("audio/") ? "audio" : null;
+  type ImportableDirectorKind = DirectorAsset["kind"];
+  const kindForDirectorFile = (file: File): ImportableDirectorKind | null =>
+    file.type.startsWith("image/") ? "image"
+      : file.type.startsWith("video/") ? "video"
+        : file.type.startsWith("audio/") ? "audio"
+          : null;
+
+  /** Read dimensions without retaining the source bytes.  This works with a
+   * WebView `asset:` URL returned from the managed store and with the browser
+   * Data URL fallback alike. */
+  const readMediaDimensions = (kind: ImportableDirectorKind, src: string) => new Promise<Pick<DirectorAsset, "mediaWidth" | "mediaHeight">>((resolve) => {
+    if (!src || kind === "audio") { resolve({}); return; }
+    if (kind === "image") {
+      const image = new Image();
+      image.onload = () => resolve({ mediaWidth: image.naturalWidth || undefined, mediaHeight: image.naturalHeight || undefined });
+      image.onerror = () => resolve({});
+      image.src = src;
+      return;
+    }
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.onloadedmetadata = () => resolve({ mediaWidth: video.videoWidth || undefined, mediaHeight: video.videoHeight || undefined });
+    video.onerror = () => resolve({});
+    video.src = src;
+  });
+
+  /** Browser/Vite preview mode cannot write into Tauri's managed store.  Keep
+   * the former FileReader behaviour strictly as a live-session fallback; the
+   * persistence layer strips the Data URL before any localStorage write. */
+  const readSessionDirectorFile = (file: File, groupId: string, groupName: string) => new Promise<DirectorAsset | null>((resolve) => {
+    const kind = kindForDirectorFile(file);
     if (!kind) { resolve(null); return; }
     const reader = new FileReader();
     reader.onerror = () => resolve(null);
     reader.onload = () => {
       const src = String(reader.result || "");
       if (!src) { resolve(null); return; }
-      const finish = (mediaWidth?: number, mediaHeight?: number) => resolve({
-        id: id(), kind, name: file.name, source: "external", src, groupId, groupName, mediaWidth, mediaHeight,
-      });
-      if (kind === "image") {
-        const image = new Image();
-        image.onload = () => finish(image.naturalWidth, image.naturalHeight);
-        image.onerror = () => finish();
-        image.src = src;
-        return;
-      }
-      if (kind === "video") {
-        const video = document.createElement("video");
-        video.preload = "metadata";
-        video.onloadedmetadata = () => finish(video.videoWidth, video.videoHeight);
-        video.onerror = () => finish();
-        video.src = src;
-        return;
-      }
-      finish();
+      void readMediaDimensions(kind, src).then((dimensions) => resolve({
+        id: id(), kind, name: file.name, source: "external", src, sessionOnly: true, groupId, groupName, ...dimensions,
+      }));
     };
     reader.readAsDataURL(file);
   });
 
+  /** Desktop imports are streamed directly into the app-managed project
+   * directory.  Only a small descriptor (asset id + local path + metadata)
+   * enters Director state, so large files never end up in localStorage. */
+  const readManagedDirectorFile = async (file: File, targetProjectId: string, groupId: string, groupName: string): Promise<DirectorAsset | null> => {
+    const kind = kindForDirectorFile(file);
+    if (!kind) return null;
+    const assetId = managedAssetId();
+    const managed = await uploadWorkspaceAsset({
+      projectId: targetProjectId,
+      assetId,
+      file,
+      fileName: file.name,
+      mimeType: file.type,
+    });
+    // A successful commit without a path cannot be rendered or recovered. Do
+    // not turn it into a misleading persistent entry.
+    if (!managed.localPath) {
+      await cleanupUnattachedWorkspaceAsset(managed, [directorAssets]);
+      throw new Error("桌面素材仓储没有返回本机文件路径；素材未加入导演台");
+    }
+    const src = sourceForNode({ localPath: managed.localPath });
+    if (!src) {
+      await cleanupUnattachedWorkspaceAsset(managed, [directorAssets]);
+      throw new Error("桌面素材仓储返回的文件路径无效；素材未加入导演台");
+    }
+    const dimensions = await readMediaDimensions(kind, src);
+    return {
+      id: managed.assetId,
+      assetId: managed.assetId,
+      kind,
+      name: managed.fileName || file.name,
+      source: "external",
+      localPath: managed.localPath,
+      groupId,
+      groupName,
+      ...dimensions,
+    };
+  };
+
   const importFiles = async (files: FileList | File[], folder = false) => {
-    const valid = Array.from(files).filter((file) => /^(image|video|audio)\//.test(file.type));
+    const targetProjectId = currentDirectorProjectRef.current;
+    const valid = Array.from(files).filter((file) => Boolean(kindForDirectorFile(file)));
     if (!valid.length) return;
     const firstPath = valid[0].webkitRelativePath || "";
     const folderName = folder && firstPath.includes("/") ? firstPath.split("/")[0] : "导入素材 " + new Date().toLocaleTimeString();
     const groupId = "import-" + id();
-    const created = (await Promise.all(valid.map((file) => readDirectorFile(file, groupId, folderName)))).filter((asset): asset is DirectorAsset => Boolean(asset));
-    if (!created.length) return;
+    const created: DirectorAsset[] = [];
+    const failures: string[] = [];
+    let browserSessionFallback = false;
+
+    const cleanupCreatedBatch = async () => {
+      const cleanupCandidates = created
+        .filter((asset): asset is DirectorAsset & { assetId: string } => Boolean(asset.assetId))
+        .map((asset): ManagedWorkspaceAsset => ({
+          projectId: targetProjectId,
+          assetId: asset.assetId,
+          localPath: asset.localPath,
+          fileName: asset.name,
+          mimeType: "application/octet-stream",
+          size: 0,
+        }));
+      await Promise.all(cleanupCandidates.map((asset) =>
+        cleanupUnattachedWorkspaceAsset(asset, [directorAssets])));
+    };
+
+    for (const file of valid) {
+      // Do not continue an old project's batch after a project switch.  The
+      // managed file may already have been safely committed to the old project,
+      // but its result must never be inserted into the new project's shelf.
+      if (currentDirectorProjectRef.current !== targetProjectId) {
+        await cleanupCreatedBatch();
+        return;
+      }
+      if (browserSessionFallback) {
+        const sessionAsset = await readSessionDirectorFile(file, groupId, folderName);
+        if (sessionAsset) created.push(sessionAsset);
+        else failures.push(file.name);
+        continue;
+      }
+
+      try {
+        const managed = await readManagedDirectorFile(file, targetProjectId, groupId, folderName);
+        if (managed && currentDirectorProjectRef.current !== targetProjectId) {
+          created.push(managed);
+          await cleanupCreatedBatch();
+          return;
+        }
+        if (managed) created.push(managed);
+        else failures.push(file.name);
+      } catch (error) {
+        if (error instanceof DesktopMediaStoreUnavailableError) {
+          browserSessionFallback = true;
+          const sessionAsset = await readSessionDirectorFile(file, groupId, folderName);
+          if (sessionAsset) created.push(sessionAsset);
+          else failures.push(file.name);
+          continue;
+        }
+        // A desktop write failure is deliberately not converted to a Data URL:
+        // doing that would look saved even though the durable copy failed. The
+        // original File remains untouched and the user can retry explicitly.
+        failures.push(`${file.name}（${error instanceof Error ? error.message : "桌面素材仓储失败"}）`);
+      }
+    }
+
+    if (currentDirectorProjectRef.current !== targetProjectId) {
+      await cleanupCreatedBatch();
+      return;
+    }
+    if (!created.length) {
+      setStorageRecoveryNotice(
+        browserSessionFallback
+          ? "浏览器预览模式无法保存独立素材；文件未加入导演台，请在桌面版重新导入。"
+          : `素材未加入导演台：${failures.slice(0, 2).join("；") || "文件无法读取"}。原始文件未被删除，可修复后重试。`,
+      );
+      return;
+    }
+    assetPersistenceBlocked.current = false;
     setDirectorAssets((previous) => [...previous, ...created]);
     setAssetGroupFilter(groupId);
+    if (browserSessionFallback) {
+      setStorageRecoveryNotice(
+        `${created.length} 个素材已在浏览器预览模式导入，仅本次会话可用；关闭或刷新后请在桌面版重新导入。${
+          failures.length ? ` ${failures.length} 个素材无法读取。` : ""
+        }`,
+      );
+    } else if (failures.length) {
+      setStorageRecoveryNotice(`${failures.length} 个素材未保存到桌面仓储，未加入导演台；原始文件未被删除，可修复后重试。`);
+    } else {
+      setStorageRecoveryNotice(null);
+    }
   };
 
   const chooseExportDirectory = async () => {
@@ -1268,7 +1589,11 @@ export default function DirectorMode({
       });
       if (typeof chosen !== "string" || !chosen) return;
       setExportDirectory(chosen);
-      localStorage.setItem("ym-director-export-directory", chosen);
+      try {
+        localStorage.setItem("ym-director-export-directory", chosen);
+      } catch {
+        setExportStatus("已选择导出位置，但无法记住该位置；下次导出需要重新选择");
+      }
     } catch {
       setExportStatus("无法打开存放位置选择窗口");
     }
@@ -1806,6 +2131,41 @@ export default function DirectorMode({
           </div>
         </header>
 
+        {(timelineSaveError || assetSaveError || storageRecoveryNotice || sessionOnlyAssets.length > 0) && (
+          <section
+            role="alert"
+            aria-live="assertive"
+            className="director-storage-notice"
+            style={{ margin: "8px 14px 0", padding: "8px 10px", border: "1px solid #b7791f", borderRadius: 6, background: "#fff8e6", color: "#6b4100", fontSize: 12 }}
+          >
+            {timelineSaveError && <div><b>保存失败：</b>{timelineSaveError}</div>}
+            {assetSaveError && <div><b>保存失败：</b>{assetSaveError}</div>}
+            {storageRecoveryNotice && <div>{storageRecoveryNotice}</div>}
+            {unavailableSessionAssets.length > 0 ? (
+              <div>
+                已恢复时间线，但 {unavailableSessionAssets.length} 个导入素材的文件内容未保存（{unavailableAssetNames}{unavailableSessionAssets.length > 3 ? " 等" : ""}）。请重新导入并重新放置相关片段。
+                <button type="button" onClick={() => fileRef.current?.click()} style={{ marginLeft: 8 }}>重新导入素材</button>
+              </div>
+            ) : sessionOnlyAssets.length > 0 ? (
+              <div>
+                {sessionOnlyAssets.length} 个导入素材仅本次会话：文件内容不会写入本机存储，也不会标记为“已保存”；关闭或刷新后请重新导入。
+              </div>
+            ) : null}
+            {(timelineSaveError || assetSaveError || storageRecoveryNotice) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setStorageRecoveryNotice(null);
+                  setStorageRetry((current) => current + 1);
+                }}
+                style={{ marginTop: 6 }}
+              >
+                重试保存
+              </button>
+            )}
+          </section>
+        )}
+
         <div className="director-main">
           <aside className="director-script">
             <b>脚本 / 导演笔记</b>
@@ -1855,7 +2215,9 @@ export default function DirectorMode({
                   muted={data.videoMuted}
                   onLoadedMetadata={(event) => {
                     const video = event.currentTarget;
-                    if (video.videoWidth && video.videoHeight) setPreviewAspect(video.videoWidth / video.videoHeight);
+                    if (video.videoWidth && video.videoHeight) {
+                      setPreviewAspect({ clipId: active.clip.clipId, value: video.videoWidth / video.videoHeight });
+                    }
                     reconcileVideoDuration(active.clip.clipId, video.duration);
                   }}
                 />
@@ -1866,7 +2228,9 @@ export default function DirectorMode({
                   alt=""
                   onLoad={(event) => {
                     const image = event.currentTarget;
-                    if (image.naturalWidth && image.naturalHeight) setPreviewAspect(image.naturalWidth / image.naturalHeight);
+                    if (image.naturalWidth && image.naturalHeight) {
+                      setPreviewAspect({ clipId: active.clip.clipId, value: image.naturalWidth / image.naturalHeight });
+                    }
                   }}
                 />
               ) : (
@@ -2286,7 +2650,7 @@ export default function DirectorMode({
                   ) : (
                     <i className="director-asset-icon" aria-hidden="true">♫</i>
                   )}
-                  <span>{node.name}</span>
+                  <span>{node.name}{sessionOnlyAssetIds.has(node.id) ? " · 仅本次会话" : ""}</span>
                   <span hidden className="director-asset-hover-actions" onPointerDown={(event) => event.stopPropagation()}>
                     <button onClick={(event) => { event.stopPropagation(); setAssetPreview(node); }}>{node.kind === "video" ? "查看 / 播放" : node.kind === "audio" ? "试听" : "查看"}</button>
                   </span>

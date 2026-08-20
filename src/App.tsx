@@ -10,24 +10,126 @@
 import MediaLibrary from "./MediaLibrary";
 import DirectorMode from "./DirectorMode";
 import CloudPointsCenter from "./CloudPointsCenter";
-import { AI_TEXT_PROVIDER_PRESETS, AiGenerationComposer, AiGenerationNodeView, type AiImageSettings, type AiReferenceImage, type AiTextSettings } from "./AiGenerationNodes";
+import { AI_IMAGE_PROVIDER_PRESETS, AI_TEXT_PROVIDER_PRESETS, AiGenerationComposer, AiGenerationNodeView, type AiImageSettings, type AiProviderOption, type AiReferenceImage, type AiTextSettings } from "./AiGenerationNodes";
 import WorkflowLibrary from "./WorkflowLibrary";
-import { applyComfyParameters, comfyParameterHelp, injectComfyPrompt, isBasicComfyParameter, readComfyWorkflowLibrary, scanComfyParameters, type ComfyParameter } from "./ComfyWorkflowParameters";
+import { applyComfyParameters, bindCanvasInputsToComfyWorkflow, comfyParameterHelp, COMFY_WORKFLOW_STORE, isBasicComfyParameter, prepareComfyVisualOutput, readComfyWorkflowLibrary, scanComfyParameters, selectComfyHistoryMedia, validateComfyWorkflow, type ComfyHistoryOutputs, type ComfyParameter, type ComfyWorkflowDiagnostic, type ComfyWorkflowInterface } from "./ComfyWorkflowParameters";
 import { CLOUD_VIDEO_MODE_LABELS, cloudModelsFor, cloudPlatformsFor, defaultCloudModel, estimateCloudPoints, supportsCloudVideoMode, type CloudVideoMode } from "./CloudModelCatalog";
-type Kind = "image" | "video" | "audio" | "text" | "storyboard" | "api" | "batch" | "aiText" | "aiImage" | "onlineVideo";
-type GenerationSource = "comfy" | "byok" | "cloud";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import defaultRainPlatform from "./assets/default-rain-platform.png";
+import defaultRooftopOutput from "./assets/default-rooftop-output.png";
+import defaultPaperboatOutput from "./assets/default-paperboat-output.png";
+import type { GraphLink as Link } from "./core/graph/types";
+import type { CanvasNodeKind as Kind } from "./core/nodes/types";
+import type {
+  ModelCapability,
+  ProviderConfig as OnlineProviderConfig,
+  ProviderConfigs as OnlineProviderConfigs,
+  ProviderModel as DetectedProviderModel,
+  ProviderProtocol,
+} from "./core/providers/types";
+import {
+  imageCapabilitiesFor,
+  imageRequestSizeFor,
+  normalizeImageGenerationOptions,
+  validateImageGenerationOptions,
+  type ImageAspectRatio,
+  type ImageResolution,
+} from "./core/providers/imageCapabilities";
+import { chooseCompatibleModel } from "./core/providers/modelSelection";
+import {
+  createStoryboardFramePlan,
+  normalizeStoryboardFramePlans,
+  parseGeneratedStoryboard,
+  storyboardGenerationSystemPrompt,
+} from "./core/storyboard/generation";
+import {
+  normalizeVideoGenerationOptions,
+  supportsVideoAudio,
+  validateVideoGenerationInput,
+  videoCapabilitiesFor,
+  videoInputLimitForMode,
+  videoModeLabel,
+  type VideoGenerationMode,
+} from "./core/providers/videoCapabilities";
+import type {
+  CanvasNode as NodeItem,
+  CanvasProject as Project,
+  GenerationSource,
+  NodeGroup,
+  ProjectHistoryRecord as HistoryProject,
+  StoryboardRow,
+} from "./core/project/types";
+import { annotationMetrics, normalizeProject } from "./core/project/migrate";
+import { deleteNodes } from "./core/project/commands";
+import { redactProjectSecrets } from "./core/project/export";
+import {
+  classifyProjectJson,
+  projectImportKindMessage,
+} from "./core/project/importFormat";
+import {
+  analyzeProjectPortability,
+  createProjectPortabilityManifest,
+} from "./core/project/portability";
+import { mergeImportedComfyWorkflows } from "./core/project/comfyWorkflowImport";
+import { validateNewLink, type NewLinkOptions } from "./core/graph/validation";
+import {
+  loadProjectWorkspace,
+  removeProjectDocument,
+  saveProjectIndex,
+  saveProjectWorkspace,
+  type ProjectWorkspaceSnapshot,
+} from "./core/project/repository";
+import {
+  planExecution,
+  type ExecutionPlanIssue,
+} from "./core/execution/plan";
+import {
+  createRunRegistry,
+  type RunToken,
+} from "./core/execution/runRegistry";
+import { createExecutionInputSignature } from "./core/execution/inputSignature";
+import {
+  cacheComfyOutputMedia,
+  uploadWorkspaceAsset,
+  type ManagedWorkspaceAsset,
+} from "./core/assets/workspaceAssetClient";
+import { cleanupUnattachedWorkspaceAsset } from "./core/assets/workspaceAssetLifecycle";
+import {
+  applyLegacyMediaMigration,
+  canApplyLegacyMediaMigration,
+  legacyDataUrlToBlob,
+  planLegacyMediaMigration,
+} from "./core/assets/legacyMediaMigration";
 type ComfyCanvasWorkflow = {
   __ymComfyPackage: true;
   libraryId?: string;
   content: unknown;
   parameters: ComfyParameter[];
   values: Record<string, string | number | boolean>;
+  interface?: ComfyWorkflowInterface;
 };
 const isComfyCanvasWorkflow = (value: unknown): value is ComfyCanvasWorkflow => Boolean(value && typeof value === "object" && (value as Record<string, unknown>).__ymComfyPackage === true);
+const referencedComfyWorkflowIds = (canvas: Project) => {
+  const ids = new Set<string>();
+  canvas.nodes.forEach((node) => {
+    if (isComfyCanvasWorkflow(node.workflow) && node.workflow.libraryId) {
+      ids.add(node.workflow.libraryId);
+      return;
+    }
+    if (node.workflow && typeof node.workflow === "object" && !Array.isArray(node.workflow)) {
+      const workflowId = (node.workflow as { comfyWorkflowId?: unknown }).comfyWorkflowId;
+      if (typeof workflowId === "string" && workflowId.trim()) ids.add(workflowId);
+    }
+  });
+  return ids;
+};
 type OnlineVideoSettings = {
   source?: GenerationSource;
   provider?: string;
   model?: string;
+  /** False/omitted follows the provider's saved default model. */
+  modelPinned?: boolean;
   mode?: "text" | "image" | "firstLast" | "reference";
   prompt?: string;
   ratio?: string;
@@ -44,75 +146,92 @@ type OnlineReference = {
   name: string;
   kind: "image" | "video";
   src: string;
+  /** Desktop-managed inputs keep their binary outside the project JSON. */
+  localPath?: string;
   source: "external" | "generated";
 };
-type DetectedProviderModel = { id: string; kind: "text" | "image" | "video" | "unknown"; modes?: CloudVideoMode[]; purpose: string };
-type OnlineProviderConfig = { endpoint: string; apiKey: string; apiSecret?: string; model: string; custom?: boolean; detectedModels?: DetectedProviderModel[] };
-type OnlineProviderConfigs = Record<string, OnlineProviderConfig>;
+type McpToolInfo = { name: string; description?: string };
+type McpServerConfig = { id: string; name: string; endpoint: string; token: string; enabled: boolean; tools: McpToolInfo[]; lastStatus?: string };
 type CloudSettings = { endpoint: string; accessToken: string; accountLabel: string };
-type StoryboardRow = {
-  shot: string;
-  visual: string;
-  dialogue: string;
-  imageId?: string;
-};
-type NodeItem = {
-  id: string;
-  kind: Kind;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  name: string;
-  text?: string;
-  storyboard?: StoryboardRow[];
-  src?: string;
-  fileName?: string;
-  localPath?: string;
-  mediaWidth?: number;
-  mediaHeight?: number;
-  workflow?: unknown;
-  onlineProvider?: string;
-  status?: string;
-  createdAt?: number;
-};
-type Link = { id: string; from: string; to: string };
-type NodeGroup = { id: string; name: string; nodeIds: string[]; bounds: { x: number; y: number; w: number; h: number }; };
-type Project = {
-  nodes: NodeItem[];
-  links: Link[];
-  view: { x: number; y: number; zoom: number };
-  groups?: NodeGroup[];
-};
-type HistoryProject = { id: string; name: string; updatedAt: number; project: Project };
-const STORE = "comfy-canvas-offline-v1";
-const HISTORY_STORE = "ym-project-history-v1";
 const ONLINE_PROVIDER_STORE = "ym-online-provider-configs-v1";
+const MCP_SERVER_STORE = "ym-mcp-server-configs-v1";
 const CLOUD_STORE = "ym-cloud-account-v1";
+const PROMPT_LIBRARY_STORE = "yimu-prompt-library";
+const OFFLINE_AUTOSAVE_INTERVAL_MS = 10 * 60 * 1000;
+type PromptLibraryEntry = {
+  id: string;
+  text: string;
+  /** "正面提示词"、"负面提示词"或用户自己命名的分类。 */
+  category: string;
+  createdAt: number;
+};
+const readPromptLibrary = (): PromptLibraryEntry[] => {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(PROMPT_LIBRARY_STORE) || "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw.flatMap((item, index) => {
+      if (typeof item === "string" && item.trim()) return [{ id: `legacy-${index}-${item.trim()}`, text: item.trim(), category: "未分类", createdAt: 0 }];
+      if (!item || typeof item !== "object") return [];
+      const value = item as Partial<PromptLibraryEntry>;
+      return typeof value.text === "string" && value.text.trim()
+        ? [{ id: value.id || `prompt-${index}`, text: value.text.trim(), category: value.category?.trim() || "未分类", createdAt: Number(value.createdAt) || 0 }]
+        : [];
+    }).slice(0, 160);
+  } catch { return []; }
+};
 const generationSourceLabel: Record<GenerationSource, string> = {
   comfy: "本地 ComfyUI",
-  byok: "自带 API Key",
-  cloud: "亿幕云端积分",
+  byok: "已保存 API 配置",
+  cloud: "已保存 API 配置",
 };
 const ONLINE_PROVIDER_DEFAULTS: Record<string, Omit<OnlineProviderConfig, "apiKey">> = {
-  "阿里百炼·万相": { endpoint: "https://dashscope.aliyuncs.com/api/v1", model: "wan2.6-t2v" },
+  OpenAI: { endpoint: "https://api.openai.com/v1", model: "gpt-4.1-mini", protocol: "openai", capabilities: ["text", "image"] },
+  OpenRouter: { endpoint: "https://openrouter.ai/api/v1", model: "", protocol: "openai", capabilities: ["text"], detectedModels: [] },
+  DeepSeek: { endpoint: "https://api.deepseek.com/v1", model: "deepseek-chat", protocol: "openai", capabilities: ["text"], detectedModels: [{ id: "deepseek-chat", kind: "text", purpose: "文本、对话或剧本生成" }] },
+  Moonshot: { endpoint: "https://api.moonshot.cn/v1", model: "", protocol: "openai", capabilities: ["text"], detectedModels: [] },
+  "硅基流动 SiliconFlow": { endpoint: "https://api.siliconflow.cn/v1", model: "", protocol: "openai", capabilities: ["text", "image"], detectedModels: [] },
+  "Ollama（本地）": {
+    endpoint: "http://127.0.0.1:11434",
+    model: "",
+    protocol: "ollama",
+    capabilities: ["text"],
+    detectedModels: [],
+  },
+  "阿里百炼·万相": {
+    endpoint: "https://dashscope.aliyuncs.com/api/v1",
+    model: "wan2.6-t2v",
+    protocol: "dashscope",
+    capabilities: ["text", "video"],
+    detectedModels: [
+      { id: "wan2.6-t2v", kind: "video", modes: ["text"], purpose: "视频 · 文生视频" },
+      { id: "wan2.6-i2v-flash", kind: "video", modes: ["image"], purpose: "视频 · 图生视频（单首帧）" },
+      { id: "wan2.2-kf2v-flash", kind: "video", modes: ["firstLast"], purpose: "视频 · 首尾帧（2 张图片）" },
+    ],
+  },
   "可灵 Kling": {
     endpoint: "https://api.klingai.com",
     model: "kling-v1-6",
+    klingAuth: "apiKey",
+    protocol: "kling",
+    capabilities: ["video"],
     detectedModels: [
-      { id: "kling-v1-6", kind: "video", modes: ["text", "image"], purpose: "视频 · 文生视频 / 图生视频" },
+      { id: "kling-v1-6", kind: "video", modes: ["text", "image", "firstLast"], purpose: "视频 · 文生视频 / 图生视频 / 首尾帧（2 张图片）" },
     ],
   },
   "豆包·火山方舟": {
     endpoint: "https://ark.cn-beijing.volces.com/api/v3",
     model: "doubao-seedance-1-0-pro-250528",
+    protocol: "volcengine",
+    capabilities: ["video"],
     detectedModels: [
-      { id: "doubao-seedance-1-0-pro-250528", kind: "video", modes: ["text", "image", "reference"], purpose: "视频 · 文生视频 / 图生视频 / 多图参考" },
+      { id: "doubao-seedance-1-0-pro-250528", kind: "video", modes: ["text", "image", "firstLast"], purpose: "视频 · 文生视频 / 图生视频 / 首尾帧（2 张图片）" },
     ],
   },
   "Google Nano Banana": {
-    endpoint: "https://generativelanguage.googleapis.com/v1beta",
+    endpoint: "https://generativelanguage.googleapis.com/v1",
     model: "gemini-3.1-flash-image",
+    protocol: "gemini",
+    capabilities: ["image"],
     detectedModels: [
       { id: "gemini-3.1-flash-image", kind: "image", purpose: "图片生成 / 多图参考 / 最高 4K" },
       { id: "gemini-3.1-flash-lite-image", kind: "image", purpose: "低成本快速图片生成 / 1K" },
@@ -120,11 +239,7 @@ const ONLINE_PROVIDER_DEFAULTS: Record<string, Omit<OnlineProviderConfig, "apiKe
       { id: "gemini-2.5-flash-image", kind: "image", purpose: "旧版 Nano Banana / 低延迟 1K" },
     ],
   },
-  "腾讯混元": { endpoint: "https://hunyuan.tencentcloudapi.com", model: "HunyuanVideo" },
-  "MiniMax Hailuo": { endpoint: "https://api.minimaxi.com", model: "video-01" },
-  "fal.ai": { endpoint: "https://fal.run", model: "fal-ai/wan-i2v" },
-  "Replicate": { endpoint: "https://api.replicate.com/v1", model: "wan-video/wan-2.1-i2v-480p" },
-  "Hugging Face": { endpoint: "https://router.huggingface.co/hf-inference", model: "Wan-AI/Wan2.1-I2V-14B-480P" },
+  "MiniMax Hailuo": { endpoint: "https://api.minimax.chat/v1", model: "MiniMax-Text-01", protocol: "openai", capabilities: ["text"] },
 };
 const classifyProviderModel = (id: string): DetectedProviderModel => {
   const value = id.toLowerCase();
@@ -139,8 +254,61 @@ const classifyProviderModel = (id: string): DetectedProviderModel => {
     return { id, kind: "video", modes, purpose: modes.length ? `视频 · ${modes.map((mode) => CLOUD_VIDEO_MODE_LABELS[mode]).join(" / ")}` : "视频模型 · 具体输入能力待平台确认" };
   }
   if (/seedream|gpt-image|gemini.*image|nano[-_.]?banana|image[-_.]?\d|flux|stable[-_.]?diffusion|sdxl|wan.*image/.test(value)) return { id, kind: "image", purpose: "图片生成 / 图片编辑" };
-  if (/gpt|qwen|claude|deepseek|gemini|minimax[-_.]?m|llama|mistral|chat|text/.test(value)) return { id, kind: "text", purpose: "文本、对话或剧本生成" };
+  if (/gpt|qwen|claude|deepseek|gemini|minimax[-_.]?m|llama|mistral|moonshot|kimi|glm|yi[-_/]|grok|chat|text/.test(value)) return { id, kind: "text", purpose: "文本、对话或剧本生成" };
   return { id, kind: "unknown", purpose: "用途待确认，不会自动用于生成" };
+};
+const capabilitiesForModel = (model: DetectedProviderModel): ModelCapability[] => {
+  if (model.capabilities?.length) return [...new Set(model.capabilities)];
+  // Repair legacy/manual classifications when the model ID itself is
+  // unambiguous (for example a `t2v` model previously marked as image).
+  const inferred = classifyProviderModel(model.id).kind;
+  if (inferred !== "unknown") return [inferred];
+  return model.kind === "unknown" ? [] : [model.kind];
+};
+const modelCapabilityLabel = (capability: ModelCapability) => capability === "text" ? "文本" : capability === "image" ? "图片" : "视频";
+const providerForExplicitModelId = (id: string): string | undefined => {
+  const value = id.trim().toLowerCase();
+  if (/^kling(?:[-_.\s]|$)/.test(value)) return "可灵 Kling";
+  return undefined;
+};
+const normalizeExplicitProviderModelId = (id: string): string => {
+  const value = id.trim();
+  if (/^kling[-_.]?v?3(?:[-_.]?0)?[-_.]?turbo$/i.test(value)) return "kling-v3";
+  if (/^kling[-_.]?v?3[-_.]?0$/i.test(value)) return "kling-v3";
+  return value;
+};
+const repairMisplacedProviderModels = (stored: OnlineProviderConfigs): OnlineProviderConfigs => {
+  let next = stored;
+  Object.entries(stored).forEach(([provider, config]) => {
+    const normalizedModel = normalizeExplicitProviderModelId(config.model || "");
+    const targetProvider = providerForExplicitModelId(normalizedModel);
+    if (normalizedModel !== config.model) {
+      if (next === stored) next = { ...stored };
+      next[provider] = { ...config, model: normalizedModel };
+    }
+    if (!targetProvider || targetProvider === provider || config.custom) return;
+    if (next === stored) next = { ...stored };
+    const targetDefaults = ONLINE_PROVIDER_DEFAULTS[targetProvider];
+    const targetConfig = next[targetProvider]
+      ? { ...targetDefaults, ...next[targetProvider] }
+      : { ...targetDefaults, apiKey: "" };
+    next[targetProvider] = { ...targetConfig, model: normalizedModel };
+    next[provider] = {
+      ...config,
+      model: ONLINE_PROVIDER_DEFAULTS[provider]?.model || "",
+    };
+  });
+  return next;
+};
+const humanizeApiError = (error: unknown) => {
+  const raw = String(error).replace(/^Error:\s*/i, "").replace(/\s+/g, " ").trim();
+  if (/HTTP 401|\b401\b|unauthenticated|invalid (api )?key|鉴权失败/i.test(raw)) return `鉴权失败：请检查 API Key / Access Key / Secret Key 是否正确、是否属于当前账户或项目。${raw ? `（${raw}）` : ""}`;
+  if (/HTTP 403|\b403\b|permission|forbidden|权限/i.test(raw)) return `权限不足：密钥有效，但当前项目、地区或模型没有调用权限。请在平台控制台开通模型或检查项目/区域。${raw ? `（${raw}）` : ""}`;
+  if (/HTTP 404|\b404\b|not found|找不到/i.test(raw)) return `找不到接口或模型：请检查接口地址、模型 ID，以及该模型是否已在平台控制台开通。${raw ? `（${raw}）` : ""}`;
+  if (/HTTP 429|\b429\b|rate limit|quota|余额|余额不足|insufficient/i.test(raw)) return `额度或频率受限：请检查余额、并发限制、套餐和平台配额。${raw ? `（${raw}）` : ""}`;
+  if (/timed? out|超时|timeout/i.test(raw)) return `请求超时：请检查网络、地区连通性，或稍后重试。视频任务也可到平台控制台查看状态。${raw ? `（${raw}）` : ""}`;
+  if (/network|连接|connect|dns|certificate/i.test(raw)) return `无法连接平台：请检查接口地址、网络代理、证书或地区网络限制。${raw ? `（${raw}）` : ""}`;
+  return raw || "未知错误，请打开运行日志并保留完整提示。";
 };
 const typeLabel: Record<Kind, string> = {
   image: "图片",
@@ -153,8 +321,248 @@ const typeLabel: Record<Kind, string> = {
   aiText: "AI 剧本",
   aiImage: "AI 图片",
   onlineVideo: "AI 视频",
+  annotation: "镜头批注",
+  annotationPointer: "批注指向",
 };
 const newId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const BROWSER_INLINE_MEDIA_MAX_BYTES = 4 * 1024 * 1024;
+
+/** Browser fallback for the development preview only.  The desktop build
+ * streams the file into AppLocalData instead, so a large file is never placed
+ * in localStorage as one giant Base64 string. */
+const readFileAsDataUrl = (file: Blob) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("无法读取媒体文件"));
+    reader.readAsDataURL(file);
+  });
+
+const readSourceAsDataUrl = async (source: string) => {
+  if (!source || source.startsWith("data:")) return source;
+  const response = await fetch(source);
+  if (!response.ok) throw new Error(`无法读取参考图：HTTP ${response.status}`);
+  return readFileAsDataUrl(await response.blob());
+};
+
+type ImportedWorkspaceMedia = {
+  src: string;
+  localPath?: string;
+  /** Present only for a newly committed desktop-store file. It lets an import
+   * that loses its target remove that exact unreferenced file. */
+  managedAsset?: ManagedWorkspaceAsset;
+};
+
+const storeMediaForProject = async (
+  file: File,
+  projectId: string,
+): Promise<ImportedWorkspaceMedia> => {
+  if (!isTauri()) {
+    if (file.size > BROWSER_INLINE_MEDIA_MAX_BYTES) {
+      throw new Error("浏览器预览模式只允许保存不超过 4 MB 的媒体；请使用桌面版导入大型图片、视频或音频。");
+    }
+    return { src: await readFileAsDataUrl(file) };
+  }
+  const asset = await uploadWorkspaceAsset({
+    projectId,
+    assetId: newId(),
+    file,
+  });
+  if (!asset.localPath) {
+    await cleanupUnattachedWorkspaceAsset(asset, []);
+    throw new Error("桌面媒体仓储没有返回可预览的文件路径");
+  }
+  let src: string;
+  try {
+    src = convertFileSrc(asset.localPath);
+  } catch (error) {
+    await cleanupUnattachedWorkspaceAsset(asset, []);
+    throw new Error(`桌面素材路径无法转换为安全预览地址：${humanizeApiError(error)}`);
+  }
+  return {
+    src,
+    localPath: asset.localPath,
+    managedAsset: asset,
+  };
+};
+
+/**
+ * ComfyUI's `/view` URL is only a live preview address.  Persist successful
+ * results into the application's managed media store before putting a card
+ * on the canvas, otherwise a Comfy restart, port change, or output cleanup
+ * turns an old video into a 0:00 / 0:00 blank player after reopening a
+ * project.  A caching failure deliberately does not discard a successful
+ * generation: the caller can still use the live Comfy preview and see a
+ * clear log entry.
+ */
+const cacheComfyGeneratedMedia = async (
+  endpoint: string,
+  file: { filename: string; subfolder?: string },
+  projectId: string,
+): Promise<ImportedWorkspaceMedia | null> => {
+  if (!isTauri()) return null;
+  const asset = await cacheComfyOutputMedia({
+    endpoint,
+    filename: file.filename,
+    subfolder: file.subfolder,
+    projectId,
+    assetId: newId(),
+  });
+  if (!asset.localPath) {
+    await cleanupUnattachedWorkspaceAsset(asset, []);
+    throw new Error("无法保存 ComfyUI 结果：桌面媒体仓储没有返回本机文件路径");
+  }
+  return {
+    src: convertFileSrc(asset.localPath),
+    localPath: asset.localPath,
+    managedAsset: asset,
+  };
+};
+
+const parseComfyViewSource = (source: string | undefined) => {
+  if (!source) return null;
+  try {
+    const url = new URL(source);
+    if (!(["http:", "https:"] as const).includes(url.protocol as "http:" | "https:")) return null;
+    const normalizedPath = url.pathname.replace(/\/+$/, "");
+    if (!normalizedPath.endsWith("/view")) return null;
+    const filename = url.searchParams.get("filename")?.trim() || "";
+    const subfolder = url.searchParams.get("subfolder")?.trim() || "";
+    const type = url.searchParams.get("type")?.trim() || "output";
+    if (!filename || type !== "output") return null;
+    const endpointPath = normalizedPath.slice(0, -"/view".length);
+    return {
+      endpoint: `${url.origin}${endpointPath}`,
+      filename,
+      subfolder,
+      sourceUrl: url.toString(),
+    };
+  } catch {
+    return null;
+  }
+};
+
+/** Resolve an already-managed asset for cards saved by earlier app versions. */
+const managedPreviewSrc = (localPath: string | undefined): string | undefined => {
+  if (!localPath) return undefined;
+  try {
+    return convertFileSrc(localPath);
+  } catch {
+    return undefined;
+  }
+};
+const appendTypedLink = (
+  project: Project,
+  from: string,
+  to: string,
+  options: NewLinkOptions = {},
+) => {
+  const validation = validateNewLink(project, from, to, {
+    ...options,
+    id: options.id || newId(),
+  });
+  return validation.valid && validation.link
+    ? { project: { ...project, links: [...project.links, validation.link] }, issues: [] }
+    : { project, issues: validation.issues };
+};
+const graphIssueText = (issues: ReturnType<typeof validateNewLink>["issues"]) =>
+  issues.map((issue) => issue.suggestion ? `${issue.message} ${issue.suggestion}` : issue.message).join(" ");
+const GRAPH_VALIDATION_PREFIX = "连线：";
+const COMFY_VALIDATION_PREFIX = "ComfyUI：";
+const EXECUTION_VALIDATION_PREFIX = "运行前：";
+const withoutExecutionValidationErrors = (errors: string[] | undefined) =>
+  (errors || []).filter((entry) => !entry.startsWith(EXECUTION_VALIDATION_PREFIX));
+const executionPlanIssueText = (issue: ExecutionPlanIssue) =>
+  `${issue.message}${issue.suggestion ? ` ${issue.suggestion}` : ""}`;
+
+/**
+ * Keep ComfyUI's structured preflight result intact until it reaches the
+ * canvas.  Turning it into a delimited Error string loses the node/slot/type
+ * coordinates that people need in order to repair a workflow.
+ */
+class ComfyWorkflowValidationError extends Error {
+  readonly diagnostics: ComfyWorkflowDiagnostic[];
+
+  constructor(diagnostics: ComfyWorkflowDiagnostic[]) {
+    const errors = diagnostics.filter((diagnostic) => diagnostic.level === "error");
+    super(errors[0]?.message || "ComfyUI 工作流校验未通过");
+    this.name = "ComfyWorkflowValidationError";
+    this.diagnostics = diagnostics;
+  }
+}
+
+const comfyDiagnosticTitle = (diagnostic: ComfyWorkflowDiagnostic) => {
+  const labels: Record<string, string> = {
+    "required-input-missing": "缺少必需输入",
+    "slot-type-mismatch": "插槽类型不匹配",
+    "source-node-missing": "来源节点不存在",
+    "source-output-missing": "来源输出不存在",
+    "missing-media-output": "未找到媒体输出",
+    "output-media-input-missing": "输出节点未接媒体",
+    "media-loader-ambiguous": "媒体加载槽不明确",
+    "source-schema-unavailable": "来源节点类型未确认",
+    "target-schema-unavailable": "目标节点类型未确认",
+    "node-schema-unavailable": "节点接口未确认",
+    "output-schema-unavailable": "输出接口未确认",
+    "output-node-without-media-contract": "输出节点没有媒体合同",
+    "output-history-missing": "输出节点未回传媒体",
+    "object-info-required": "未读取节点接口",
+    "prompt-slot-unbound": "未找到正向文本槽",
+    "prompt-slot-ambiguous": "正向文本槽不明确",
+    "media-loader-unbound": "未找到媒体加载槽",
+  };
+  return diagnostic.code ? labels[diagnostic.code] || "ComfyUI 工作流提示" : "ComfyUI 工作流提示";
+};
+
+const comfyDiagnosticLocation = (diagnostic: ComfyWorkflowDiagnostic) => {
+  const location: string[] = [];
+  if (diagnostic.nodeId) location.push(`节点 #${diagnostic.nodeId}`);
+  if (diagnostic.input) location.push(`插槽「${diagnostic.input}」`);
+  if (diagnostic.sourceNodeId) location.push(`来源 #${diagnostic.sourceNodeId}`);
+  if (typeof diagnostic.sourceOutputIndex === "number") location.push(`输出 #${diagnostic.sourceOutputIndex}`);
+  return location.join(" · ");
+};
+
+const comfyDiagnosticSummary = (diagnostic: ComfyWorkflowDiagnostic) => {
+  const location = comfyDiagnosticLocation(diagnostic);
+  return `${COMFY_VALIDATION_PREFIX}${location ? `${location}：` : ""}${diagnostic.message}`;
+};
+
+const comfyDiagnosticRepair = (diagnostic: ComfyWorkflowDiagnostic) => {
+  if (diagnostic.code === "slot-type-mismatch") {
+    const source = diagnostic.sourceNodeId ? `来源节点 #${diagnostic.sourceNodeId}` : "来源节点";
+    const target = diagnostic.nodeId ? `节点 #${diagnostic.nodeId}` : "目标节点";
+    return `在 ComfyUI 中把 ${source} 的 ${diagnostic.actualType || "实际"} 输出，改接到可接受该类型的插槽；或为 ${target} 的「${diagnostic.input || "目标"}」接入 ${diagnostic.expectedType || "所需"} 输出。`;
+  }
+  if (diagnostic.code === "required-input-missing" || diagnostic.code === "output-media-input-missing") {
+    return `在 ComfyUI 中为节点 #${diagnostic.nodeId || "?"} 的「${diagnostic.input || "必需"}」提供 ${diagnostic.expectedType || "所需类型"}：连接同类型上游输出，或填写该节点允许的固定值。`;
+  }
+  if (diagnostic.code === "source-node-missing" || diagnostic.code === "source-output-missing") {
+    return "该工作流引用已失效。请在 ComfyUI 中重新连线并重新导出 API JSON；不要手工猜测旧节点 ID。";
+  }
+  if (diagnostic.code === "missing-media-output") {
+    return "请把最终图片、视频或音频分支连到真实保存/预览输出节点，再重新导出或刷新当前 API 工作流。";
+  }
+  if (diagnostic.code === "output-history-missing") {
+    return "任务已完成但该已验证输出节点没有在 /history 回传媒体。请检查该保存/预览节点是否启用、是否连接了媒体输入，以及 ComfyUI 是否支持把该节点结果写入 history。";
+  }
+  if (diagnostic.code === "media-loader-ambiguous") {
+    return "请在工作流中只保留一个对应素材的上传字段，或让自定义节点的 object_info 提供 upload 标记，然后重试。";
+  }
+  if (diagnostic.code === "object-info-required") {
+    return "请确认本地 ComfyUI 已启动且 /object_info 可访问，再重新运行；画布不会用保存的旧接口猜测提示词或媒体槽。";
+  }
+  if (diagnostic.code === "prompt-slot-unbound" || diagnostic.code === "prompt-slot-ambiguous") {
+    return "请在 ComfyUI 中确认正向提示词使用 STRING/TEXT 槽，并让当前 /object_info 能看到该槽；若有多个同级正向分支，请明确保留一个可写入分支。";
+  }
+  if (diagnostic.code === "media-loader-unbound") {
+    return "请把画布素材接到工作流中带 image_upload、video_upload 或 audio_upload 标记的加载节点，再重新导出 API JSON。";
+  }
+  return "请按上面的节点、插槽和类型提示在 ComfyUI 中修复；修复后点击“重试”会重新读取当前 object_info 校验。";
+};
+
+const withoutComfyValidationErrors = (errors: string[] | undefined) =>
+  (errors || []).filter((entry) => !entry.startsWith(COMFY_VALIDATION_PREFIX));
 const groupNewId = () => "grp-" + newId();
 const nodeSize: Record<Kind, [number, number]> = {
   image: [300, 220],
@@ -167,6 +575,42 @@ const nodeSize: Record<Kind, [number, number]> = {
   aiText: [360, 220],
   aiImage: [360, 240],
   onlineVideo: [360, 240],
+  annotation: [250, 115],
+  annotationPointer: [58, 58],
+};
+
+/**
+ * ComfyUI history only gives us a filename.  Read the browser-decoded media
+ * dimensions before creating a canvas card so a portrait video is never put
+ * into the old hard-coded landscape 320×220 frame and cropped by object-fit.
+ */
+const readGeneratedMediaDimensions = (kind: Extract<Kind, "image" | "video">, src: string) =>
+  new Promise<{ width: number; height: number } | null>((resolve) => {
+    if (kind === "image") {
+      const image = new Image();
+      image.onload = () => resolve(image.naturalWidth > 0 && image.naturalHeight > 0
+        ? { width: image.naturalWidth, height: image.naturalHeight }
+        : null);
+      image.onerror = () => resolve(null);
+      image.src = src;
+      return;
+    }
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.onloadedmetadata = () => resolve(video.videoWidth > 0 && video.videoHeight > 0
+      ? { width: video.videoWidth, height: video.videoHeight }
+      : null);
+    video.onerror = () => resolve(null);
+    video.src = src;
+  });
+
+const generatedMediaCardSize = (kind: Extract<Kind, "image" | "video">, dimensions: { width: number; height: number } | null) => {
+  const [fallbackWidth, fallbackHeight] = nodeSize[kind];
+  if (!dimensions) return { width: fallbackWidth, height: fallbackHeight };
+  // Keep cards practical on the canvas while preserving the decoded aspect
+  // ratio. The 29px allowance is the media card's filename/title bar.
+  const width = Math.max(180, Math.min(440, Math.round(300 * dimensions.width / dimensions.height)));
+  return { width, height: Math.max(120, Math.round(width * dimensions.height / dimensions.width) + 29) };
 };
 const onlineVideoSizeForRatio = (ratio?: string): [number, number] => {
   const [rawWidth, rawHeight] = (ratio || "16:9").split(":").map(Number);
@@ -195,85 +639,59 @@ const storyboardText = (rows: StoryboardRow[] = []) =>
     .filter(Boolean)
     .join("\n\n");
 function starter(): Project {
-  return {
-    view: { x: 190, y: 130, zoom: 1 },
+  return normalizeProject({
+    view: { x: 120, y: 92, zoom: 0.86 },
     links: [],
     nodes: [
       {
         id: newId(),
-        kind: "text",
-        x: 110,
-        y: 100,
-        width: 270,
-        height: 175,
-        name: "剧本提示词",
-        text: "在这里输入你的故事、提示词或备注。\n拖动节点圆点可以连接到 API 工作流。",
+        kind: "image",
+        x: 360,
+        y: 140,
+        width: 620,
+        height: 378,
+        name: "场景 12 · 雨夜，天台",
+        src: defaultRainPlatform,
+        createdAt: Date.now(),
       },
       {
         id: newId(),
-        kind: "api",
-        x: 510,
-        y: 150,
-        width: 116,
-        height: 58,
-        name: "导入工作流",
-        status: "idle",
+        kind: "text",
+        x: 370,
+        y: 535,
+        width: 590,
+        height: 160,
+        name: "雨夜，天台",
+        text: "场景 12\n\n雨夜，天台\n\n她独自站在天台边缘，城市在脚下沉默。风吹起她的发梢，她没有回头。远处霓虹闪烁，一声汽笛划破夜色。",
+        createdAt: Date.now(),
+      },
+      {
+        id: newId(), kind: "image", x: 1060, y: 150, width: 270, height: 180,
+        name: "输出 01", src: defaultRooftopOutput, createdAt: Date.now(),
+      },
+      {
+        id: newId(), kind: "image", x: 1060, y: 415, width: 270, height: 180,
+        name: "输出 02", src: defaultPaperboatOutput, createdAt: Date.now(),
+      },
+      {
+        id: newId(), kind: "annotation", x: 95, y: 385, width: 250, height: annotationMetrics("情绪转折点。\n冷静的表象下是汹涌的告别。", 250).height,
+        name: "镜头批注", text: "情绪转折点。\n冷静的表象下是汹涌的告别。", fontSize: 19, rotation: -8, createdAt: Date.now(),
+      },
+      {
+        id: newId(), kind: "annotation", x: 1360, y: 480, width: 210, height: annotationMetrics("备选镜头：\n更克制，更留白。", 210).height,
+        name: "镜头批注", text: "备选镜头：\n更克制，更留白。", fontSize: 19, rotation: 7, createdAt: Date.now(),
       },
     ],
-  };
-}
-function load(): Project {
-  try {
-    const p = JSON.parse(localStorage.getItem(STORE) || "");
-    return p?.nodes ? safeProject(p) : starter();
-  } catch {
-    return starter();
-  }
-}
-function safeProject(p: Project): Project {
-  const legacyVideoOutputs: NodeItem[] = [];
-  const migratedNodes = p.nodes.map((node) => {
-    if (node.kind !== "onlineVideo" || !node.src) {
-      return node.kind === "onlineVideo" && node.width > 400
-        ? { ...node, width: 360, height: 240, name: node.name === "可选节点" ? "AI 视频生成" : node.name }
-        : node;
-    }
-    const outputId = `video-output-${node.id}`;
-    legacyVideoOutputs.push({
-      id: outputId,
-      kind: "video",
-      x: node.x,
-      y: node.y,
-      width: node.width,
-      height: node.height,
-      name: node.name,
-      fileName: node.fileName,
-      src: node.src,
-      localPath: node.localPath,
-      mediaWidth: node.mediaWidth,
-      mediaHeight: node.mediaHeight,
-      createdAt: node.createdAt,
-    });
-    const { src: _src, fileName: _fileName, localPath: _localPath, mediaWidth: _mediaWidth, mediaHeight: _mediaHeight, createdAt: _createdAt, ...generator } = node;
-    return { ...generator, x: node.x, y: node.y + node.height + 70, width: 360, height: 240, name: "AI 视频生成", status: "done" };
   });
-  const legacyLinks = legacyVideoOutputs
-    .filter((output) => !(p.links || []).some((link) => link.to === output.id))
-    .map((output) => ({ id: newId(), from: output.id.replace(/^video-output-/, ""), to: output.id }));
-  return {
-    ...p,
-    nodes: [...migratedNodes, ...legacyVideoOutputs],
-    links: [...(p.links || []), ...legacyLinks],
-  };
 }
-function loadHistory(): HistoryProject[] {
-  try {
-    const records = JSON.parse(localStorage.getItem(HISTORY_STORE) || "[]");
-    return Array.isArray(records) ? records : [];
-  } catch {
-    return [];
+const safeProject = normalizeProject;
+let initialWorkspaceCache: ProjectWorkspaceSnapshot | null = null;
+const initialWorkspace = () => {
+  if (!initialWorkspaceCache) {
+    initialWorkspaceCache = loadProjectWorkspace(localStorage, starter(), newId);
   }
-}
+  return initialWorkspaceCache;
+};
 function AudioWave({ src }: { src: string }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const pointerStart = useRef<{ x: number; y: number } | null>(null);
@@ -327,15 +745,26 @@ function AudioWave({ src }: { src: string }) {
 }
 function VideoCanvas({
   src,
+  fallbackSrc,
   onMetadata,
+  onPlaybackError,
 }: {
   src: string;
+  fallbackSrc?: string;
   onMetadata: (width: number, height: number) => void;
+  onPlaybackError?: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [muted, setMuted] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [activeSrc, setActiveSrc] = useState(src);
+  useEffect(() => {
+    setCurrent(0);
+    setDuration(0);
+    setLoadError(false);
+    setActiveSrc(src);
+  }, [src, fallbackSrc]);
   const format = (seconds: number) => {
     const value = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
     return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
@@ -346,51 +775,113 @@ function VideoCanvas({
     if (video.paused) video.play().catch(() => {});
     else video.pause();
   };
-  const fullscreen = () => videoRef.current?.requestFullscreen?.().catch(() => {});
   return (
-    <div className="canvas-video-player" onClick={toggle} title="点击播放或暂停">
+    <div
+      className="canvas-video-player"
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={toggle}
+      title="点击播放或暂停"
+    >
       <video
         ref={videoRef}
-        src={src}
         preload="metadata"
         onLoadedMetadata={(event) => {
           const video = event.currentTarget;
+          setLoadError(false);
           setDuration(video.duration);
           onMetadata(video.videoWidth, video.videoHeight);
         }}
         onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime)}
         onEnded={() => setCurrent(duration)}
+        onError={() => {
+          // A generated ComfyUI video is persisted locally for project
+          // portability, but the asset protocol can occasionally be one
+          // render behind right after a commit. Retry the original /view URL
+          // exactly once before reporting a real preview error.
+          if (fallbackSrc && fallbackSrc !== activeSrc) {
+            setActiveSrc(fallbackSrc);
+            return;
+          }
+          setLoadError(true);
+          onPlaybackError?.();
+        }}
+        src={activeSrc}
       />
-      <div className="canvas-video-tools" onClick={(event) => event.stopPropagation()}>
-        <div className="canvas-video-actions">
-          <button title="放大播放" onClick={fullscreen}>⛶</button>
-          <button
-            title={muted ? "打开声音" : "静音"}
-            onClick={() => {
-              const video = videoRef.current;
-              if (!video) return;
-              video.muted = !video.muted;
-              setMuted(video.muted);
-            }}
-          >
-            {muted ? "🔇" : "🔊"}
-          </button>
-        </div>
+      {loadError ? <div className="canvas-video-load-error">视频预览无法读取：本机缓存和 ComfyUI 原始结果都不可用。</div> : null}
+      <div className="canvas-video-tools" aria-hidden="true">
         <time>{format(current)} / {format(duration)}</time>
       </div>
     </div>
   );
 }
+
+function CinematicLanding({
+  onEnterCanvas,
+  onOpenScript,
+  onOpenImage,
+  onGenerate,
+  projectName,
+  onProjectNameChange,
+}: {
+  onEnterCanvas: () => void;
+  onOpenScript: () => void;
+  onOpenImage: () => void;
+  onGenerate: (prompt: string) => void;
+  projectName: string;
+  onProjectNameChange: (value: string) => void;
+}) {
+  const [prompt, setPrompt] = useState("");
+  const [notesVisible, setNotesVisible] = useState(true);
+  const submit = () => onGenerate(prompt.trim());
+  return (
+    <section className="cinematic-landing" aria-label="亿幕画布默认创作页">
+      <header className="cinematic-landing-header">
+        <button className="cinematic-brand" onClick={onEnterCanvas} title="进入无限画布">亿幕画布</button>
+        <label className="cinematic-project-name"><i /><input value={projectName} onChange={(event) => onProjectNameChange(event.target.value)} aria-label="项目名称" /></label>
+        <nav aria-label="创作入口">
+          <button onClick={onOpenScript}>脚本</button>
+          <button onClick={onOpenImage}>画面</button>
+          <button className="cinematic-generate-nav" onClick={submit}>生成</button>
+        </nav>
+      </header>
+      <button
+        className="cinematic-note-toggle"
+        aria-pressed={notesVisible}
+        onClick={() => setNotesVisible((visible) => !visible)}
+      >
+        {notesVisible ? "隐藏批注" : "镜头批注"}
+      </button>
+      <div className="cinematic-stage">
+        {notesVisible && <button className="cinematic-note left" onClick={() => setNotesVisible(false)} title="点击隐藏镜头批注">
+          <span>情绪转折点。<br />冷静的表象下是汹涌的告别。</span><i />
+        </button>}
+        <article className="cinematic-main-card">
+          <img src={defaultRainPlatform} alt="雨夜室内，桌灯旁独坐的人物" />
+          <div className="cinematic-main-copy">
+            <small>场景 12</small>
+            <h1>雨夜，天台</h1>
+            <p>她独自站在天台边缘，城市在脚下沉默。风吹起她的发梢，<br />她没有回头。远处霓虹闪烁，一声汽笛划破夜色。</p>
+          </div>
+        </article>
+        <aside className="cinematic-outputs" aria-label="输出镜头">
+          <article><img src={defaultRooftopOutput} alt="雨夜天台的孤独背影" /><footer><span>输出 01</span><i /></footer></article>
+          <article><img src={defaultPaperboatOutput} alt="雨水中漂浮的纸船" /><footer><span>输出 02</span><i /></footer></article>
+        </aside>
+        {notesVisible && <button className="cinematic-note right" onClick={() => setNotesVisible(false)} title="点击隐藏镜头批注">
+          <span>备选镜头：<br />更克制，更留白。</span><i />
+        </button>}
+      </div>
+      <form className="cinematic-prompt" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+        <input value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="描述你想要生成的画面…" aria-label="生成画面描述" />
+        <button type="submit">生成</button>
+      </form>
+    </section>
+  );
+}
 export default function App() {
-  const [introEnabled, setIntroEnabled] = useState(
-    () => localStorage.getItem("ym-intro-enabled") !== "false",
-  );
-  const [intro, setIntro] = useState<"animating" | "ready" | "off">(
-    () => (localStorage.getItem("ym-intro-enabled") === "false" ? "off" : "animating"),
-  );
-  const [project, setProject] = useState<Project>(load);
-  const [historyId, setHistoryId] = useState(() => localStorage.getItem("ym-active-project") || newId());
-  const [historyProjects, setHistoryProjects] = useState<HistoryProject[]>(loadHistory);
+  const [project, setProject] = useState<Project>(() => initialWorkspace().project);
+  const [historyId, setHistoryId] = useState(() => initialWorkspace().activeId);
+  const [historyProjects, setHistoryProjects] = useState<HistoryProject[]>(() => initialWorkspace().history);
   const [selected, setSelected] = useState<string[]>([]);
   const [selectedLinks, setSelectedLinks] = useState<string[]>([]);
   const [menu, setMenu] = useState<{
@@ -405,6 +896,30 @@ export default function App() {
   } | null>(null);
   const [panning, setPanning] = useState(false);
   const [studioOpen, setStudioOpen] = useState(false);
+  const [cinematicLandingOpen, setCinematicLandingOpen] = useState(false);
+  const [projectName, setProjectName] = useState(() => initialWorkspace().activeName);
+  // Project identity may change while a file reader or a remote generation is
+  // waiting.  These refs are the authoritative latest snapshot for synchronous
+  // flushes; React state remains the rendering source of truth.
+  const projectRef = useRef(project);
+  const historyIdRef = useRef(historyId);
+  const projectNameRef = useRef(projectName);
+  const historyProjectsRef = useRef(historyProjects);
+  // Explicit legacy-media migrations are asynchronous maintenance sessions.
+  // Project activation invalidates the session before a committed upload can
+  // patch a different canvas.
+  const legacyMigrationSequence = useRef(0);
+  const mediaRecoveryAttempted = useRef(new Set<string>());
+  projectRef.current = project;
+  historyIdRef.current = historyId;
+  projectNameRef.current = projectName;
+  historyProjectsRef.current = historyProjects;
+  // Saving on close/switch is synchronous, so keep the ref in step with an
+  // input event instead of waiting for React to render the edited title.
+  const updateActiveProjectName = (nextName: string) => {
+    projectNameRef.current = nextName;
+    setProjectName(nextName);
+  };
   const [navOpen, setNavOpen] = useState(false);
   const [selectionBox, setSelectionBox] = useState<{
     x: number;
@@ -419,6 +934,7 @@ export default function App() {
     height: number;
   } | null>(null);
   const [activeText, setActiveText] = useState<string | null>(null);
+  const [editingAnnotation, setEditingAnnotation] = useState<string | null>(null);
   const [activeOnlineVideo, setActiveOnlineVideo] = useState<string | null>(null);
   const [onlinePopover, setOnlinePopover] = useState<{
     nodeId: string;
@@ -429,15 +945,33 @@ export default function App() {
     start: number;
     end: number;
   } | null>(null);
+  const [promptLibraryTarget, setPromptLibraryTarget] = useState<{ nodeId: string; kind: "ai" | "video" } | null>(null);
   const [promptLibraryText, setPromptLibraryText] = useState("");
-  const [promptLibraryEntries, setPromptLibraryEntries] = useState<string[]>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem("yimu-prompt-library") || "[]");
-      return Array.isArray(saved) ? saved.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).slice(0, 48) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [promptLibraryEntries, setPromptLibraryEntries] = useState<PromptLibraryEntry[]>(readPromptLibrary);
+  const [promptLibrarySearch, setPromptLibrarySearch] = useState("");
+  const [promptLibraryCategory, setPromptLibraryCategory] = useState("正面提示词");
+  const [promptLibraryFilter, setPromptLibraryFilter] = useState("全部");
+  const savePromptLibrary = (entries: PromptLibraryEntry[]) => {
+    const next = entries.slice(0, 160);
+    setPromptLibraryEntries(next);
+    localStorage.setItem(PROMPT_LIBRARY_STORE, JSON.stringify(next));
+  };
+  const insertPromptLibraryEntry = (entry: PromptLibraryEntry) => {
+    const target = promptLibraryTarget;
+    if (!target) return;
+    change((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) => node.id !== target.nodeId ? node : {
+        ...node,
+        workflow: {
+          ...((node.workflow && typeof node.workflow === "object" ? node.workflow : {}) as Record<string, unknown>),
+          prompt: `${String((node.workflow as { prompt?: unknown } | undefined)?.prompt || "").trim()}${(node.workflow as { prompt?: unknown } | undefined)?.prompt ? " " : ""}${entry.text}`,
+        },
+      }),
+    }));
+    setPromptLibraryTarget(null);
+    setMessage(`已写入“${entry.category}”提示词`);
+  };
   const [activeStoryboard, setActiveStoryboard] = useState<string | null>(null);
   const [storyboardPaste, setStoryboardPaste] = useState("");
   const [previewImage, setPreviewImage] = useState<NodeItem | null>(null);
@@ -446,21 +980,46 @@ export default function App() {
   const [recentOpen, setRecentOpen] = useState(false);
   const [recent, setRecent] = useState<NodeItem[]>([]);
   const [message, setMessage] = useState("已离线保存");
+  const [legacyMigrationProgress, setLegacyMigrationProgress] = useState({
+    running: false,
+    total: 0,
+    completed: 0,
+    failed: 0,
+    skipped: 0,
+    current: "",
+  });
   const [settings, setSettings] = useState(false);
   const [preferences, setPreferences] = useState(false);
   const [onlineApiOpen, setOnlineApiOpen] = useState(false);
+  const [serviceConfigSection, setServiceConfigSection] = useState<"models" | "mcp">("models");
+  const [providerCapabilityFilter, setProviderCapabilityFilter] = useState<ModelCapability | "all">("all");
   const [cloudPointsOpen, setCloudPointsOpen] = useState(false);
   const [onlineConfigTab, setOnlineConfigTab] = useState<"byok" | "cloud">("byok");
   const [onlineConfigProvider, setOnlineConfigProvider] = useState("阿里百炼·万相");
+  const [providerModelDraft, setProviderModelDraft] = useState("");
   const [customProviderName, setCustomProviderName] = useState("");
   const [addingCustomProvider, setAddingCustomProvider] = useState(false);
   const [discoveringModels, setDiscoveringModels] = useState(false);
+  const [testingProvider, setTestingProvider] = useState(false);
+  const [providerTestResult, setProviderTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [onlineProviderConfigs, setOnlineProviderConfigs] = useState<OnlineProviderConfigs>(() => {
     try {
       const stored = JSON.parse(localStorage.getItem(ONLINE_PROVIDER_STORE) || "{}") as OnlineProviderConfigs;
-      return stored && typeof stored === "object" ? stored : {};
+      const ollama = stored?.["Ollama（本地）"];
+      if (ollama && !ollama.detectedModels?.length && ["llama3.2", "qwen2.5", "deepseek-r1"].includes(ollama.model)) {
+        stored["Ollama（本地）"] = { ...ollama, model: "" };
+      }
+      return stored && typeof stored === "object" ? repairMisplacedProviderModels(stored) : {};
     } catch { return {}; }
   });
+  const [mcpServers, setMcpServers] = useState<McpServerConfig[]>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(MCP_SERVER_STORE) || "[]") as McpServerConfig[];
+      return Array.isArray(stored) ? stored : [];
+    } catch { return []; }
+  });
+  const [activeMcpServer, setActiveMcpServer] = useState<string | null>(null);
+  const [testingMcp, setTestingMcp] = useState(false);
   const [cloudSettings, setCloudSettings] = useState<CloudSettings>(() => {
     try {
       const stored = JSON.parse(localStorage.getItem(CLOUD_STORE) || "{}") as Partial<CloudSettings>;
@@ -474,6 +1033,11 @@ export default function App() {
     }
   });
   const [activeApiConfig, setActiveApiConfig] = useState<string | null>(null);
+  // Runtime-only because a ComfyUI schema may change between app launches.
+  // The text badge on the node is persisted separately for a quick reminder,
+  // while this map keeps the exact node/slot/type coordinates expandable.
+  const [comfyDiagnostics, setComfyDiagnostics] = useState<Record<string, ComfyWorkflowDiagnostic[]>>({});
+  const [expandedComfyDiagnostics, setExpandedComfyDiagnostics] = useState<string | null>(null);
   const [logsOpen, setLogsOpen] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [mediaLibraryOpen, setMediaLibraryOpen] = useState(false);
@@ -497,7 +1061,9 @@ export default function App() {
   const [defaultSaveDir, setDefaultSaveDir] = useState(
     () => localStorage.getItem("ym-default-save-dir") || "",
   );
-  const [theme, setTheme] = useState(() => localStorage.getItem("ym-theme") || "mint");
+  // The product uses one deliberate default visual language: noir editorial.
+  // Keep the class for CSS scoping, but don't restore legacy colour themes.
+  const resolvedTheme = "obsidian";
   const [topMenuOpen, setTopMenuOpen] = useState(false);
   const [canvasShortcutsOpen, setCanvasShortcutsOpen] = useState(false);
   const [comfyConnected, setComfyConnected] = useState(false);
@@ -524,13 +1090,97 @@ export default function App() {
   const selectedOnlineProvider = onlineProviderConfigs[onlineConfigProvider]
     ? { ...ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider], ...onlineProviderConfigs[onlineConfigProvider] }
     : { ...ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider], apiKey: "" };
+  const selectedOnlineProviderModels = [
+    ...((selectedOnlineProvider.detectedModels || []) as DetectedProviderModel[]),
+    ...((ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider]?.detectedModels || []) as DetectedProviderModel[]),
+  ].filter((model, index, models) => models.findIndex((candidate) => candidate.id === model.id) === index);
+  const editedProviderModelId = providerModelDraft.trim();
+  const selectedOnlineProviderModel = selectedOnlineProviderModels.find((model) => model.id === editedProviderModelId);
+  const selectedOnlineProviderModelCapabilities = editedProviderModelId
+    ? capabilitiesForModel(selectedOnlineProviderModel || classifyProviderModel(editedProviderModelId))
+    : [];
+  const openAiProvider = onlineProviderConfigs.OpenAI
+    ? { ...ONLINE_PROVIDER_DEFAULTS.OpenAI, ...onlineProviderConfigs.OpenAI }
+    : { ...ONLINE_PROVIDER_DEFAULTS.OpenAI, apiKey: openAiConfig.apiKey || "" };
   const onlineProviderNames = [...new Set([...Object.keys(ONLINE_PROVIDER_DEFAULTS), ...Object.keys(onlineProviderConfigs)])];
-  const onlineVideoProviderNames = onlineProviderNames.filter((provider) => {
-    const saved = onlineProviderConfigs[provider];
+  const resolvedProviderConfig = (provider: string) => {
     const defaults = ONLINE_PROVIDER_DEFAULTS[provider];
-    const models = (saved ? { ...defaults, ...saved } : defaults)?.detectedModels || [];
-    return models.length === 0 || models.some((model) => model.kind === "video");
-  });
+    return onlineProviderConfigs[provider] ? { ...defaults, ...onlineProviderConfigs[provider] } : defaults;
+  };
+  useEffect(() => {
+    if (!onlineApiOpen || serviceConfigSection !== "models") return;
+    setProviderModelDraft(resolvedProviderConfig(onlineConfigProvider)?.model || "");
+  }, [onlineApiOpen, onlineConfigProvider, serviceConfigSection]);
+  const capabilitiesForProvider = (provider: string): ModelCapability[] => {
+    const config = resolvedProviderConfig(provider);
+    return [...new Set([
+      ...(config?.capabilities || []),
+      ...(config?.detectedModels || []).flatMap(capabilitiesForModel),
+    ])];
+  };
+  const modelsForProvider = (provider: string, capability: ModelCapability) => {
+    const config = resolvedProviderConfig(provider);
+    const detectedModels = config?.detectedModels || [];
+    const detected = detectedModels.filter((model) => capabilitiesForModel(model).includes(capability)).map((model) => model.id);
+    const configuredModel = config?.model
+      ? detectedModels.find((model) => model.id === config.model) || classifyProviderModel(config.model)
+      : null;
+    const configured = config?.model && configuredModel && capabilitiesForModel(configuredModel).includes(capability) ? [config.model] : [];
+    return [...new Set([...configured, ...detected])];
+  };
+  const compatibleModelForProvider = (
+    provider: string,
+    capability: ModelCapability,
+    ...candidates: Array<string | undefined>
+  ) => {
+    const compatible = modelsForProvider(provider, capability);
+    return chooseCompatibleModel(compatible, ...candidates);
+  };
+  /**
+   * The canvas must not offer a provider merely because it has a built-in
+   * preset.  A selectable provider is a saved, usable connection for that
+   * node type.  This keeps the normal path as: save once → choose here →
+   * generate, instead of opening the configuration dialog after every click.
+   */
+  const providerIsReadyFor = (provider: string, capability: ModelCapability) => {
+    if (!capabilitiesForProvider(provider).includes(capability)) return false;
+    const config = resolvedProviderConfig(provider);
+    const savedConfig = onlineProviderConfigs[provider];
+    if (!config?.endpoint?.trim()) return false;
+    if (provider === "Ollama（本地）") {
+      return Boolean(config.model?.trim() || modelsForProvider(provider, capability).length);
+    }
+    if (provider === "OpenAI") return Boolean(openAiProvider.apiKey?.trim());
+    return Boolean(savedConfig?.apiKey?.trim());
+  };
+  const presetModelsForProvider = (provider: string, capability: ModelCapability) => {
+    if (capability === "text") {
+      const name = provider === "阿里百炼·万相" ? "阿里百炼·通义千问" : provider === "MiniMax Hailuo" ? "MiniMax" : provider;
+      return AI_TEXT_PROVIDER_PRESETS[name as keyof typeof AI_TEXT_PROVIDER_PRESETS]?.models || [];
+    }
+    if (capability === "image") return AI_IMAGE_PROVIDER_PRESETS[provider as keyof typeof AI_IMAGE_PROVIDER_PRESETS]?.models || [];
+    return [];
+  };
+  const readyProviderNamesFor = (capability: ModelCapability) => onlineProviderNames
+    .filter((provider) => providerIsReadyFor(provider, capability))
+    .filter((provider) => modelsForProvider(provider, capability).length > 0 || presetModelsForProvider(provider, capability).length > 0);
+  const textProviderOptions: AiProviderOption[] = readyProviderNamesFor("text")
+    .map((provider) => {
+      const name = provider === "阿里百炼·万相" ? "阿里百炼·通义千问" : provider === "MiniMax Hailuo" ? "MiniMax" : provider;
+      const preset = AI_TEXT_PROVIDER_PRESETS[name as keyof typeof AI_TEXT_PROVIDER_PRESETS];
+      const models = [...new Set([...modelsForProvider(provider, "text"), ...(preset?.models || [])])];
+      return { name, models, defaultModel: models[0] || "" };
+    });
+  const imageProviderOptions: AiProviderOption[] = [
+    ...readyProviderNamesFor("image").map((provider) => {
+      const preset = AI_IMAGE_PROVIDER_PRESETS[provider as keyof typeof AI_IMAGE_PROVIDER_PRESETS];
+      const models = [...new Set([...modelsForProvider(provider, "image"), ...(preset?.models || [])])];
+      return { name: provider, models, defaultModel: models[0] || "" };
+    }),
+  ];
+  const filteredOnlineProviderNames = onlineProviderNames.filter((provider) => providerCapabilityFilter === "all" || capabilitiesForProvider(provider).includes(providerCapabilityFilter));
+  const activeMcpConfig = mcpServers.find((server) => server.id === activeMcpServer) || mcpServers[0] || null;
+  const onlineVideoProviderNames = readyProviderNamesFor("video");
   const updateOnlineProviderConfig = (patch: Partial<OnlineProviderConfig>) => {
     setOnlineProviderConfigs((current) => {
       const base = current[onlineConfigProvider]
@@ -539,15 +1189,76 @@ export default function App() {
       return { ...current, [onlineConfigProvider]: { ...base, ...patch } };
     });
   };
-  const openOnlineConfiguration = (tab: "byok" | "cloud", provider?: string) => {
+  const addOrUpdateProviderModel = () => {
+    const id = normalizeExplicitProviderModelId(providerModelDraft);
+    if (!id) {
+      setMessage("请先填写要加入当前平台的模型 ID。");
+      return;
+    }
+    const targetProvider = providerForExplicitModelId(id);
+    if (targetProvider && targetProvider !== onlineConfigProvider && !selectedOnlineProvider.custom) {
+      const classified = classifyProviderModel(id);
+      setOnlineProviderConfigs((current) => {
+        const targetConfig = current[targetProvider]
+          ? { ...ONLINE_PROVIDER_DEFAULTS[targetProvider], ...current[targetProvider] }
+          : { ...ONLINE_PROVIDER_DEFAULTS[targetProvider], apiKey: "" };
+        const detectedModels = [
+          ...(targetConfig.detectedModels || []).filter((model) => model.id !== id),
+          classified,
+        ];
+        return {
+          ...current,
+          [targetProvider]: {
+            ...targetConfig,
+            model: targetConfig.model || id,
+            detectedModels,
+            capabilities: [...new Set([...(targetConfig.capabilities || []), ...capabilitiesForModel(classified)])],
+          },
+        };
+      });
+      setOnlineConfigProvider(targetProvider);
+      setProviderModelDraft(id);
+      setProviderTestResult(null);
+      setMessage(`“${id}”属于“${targetProvider}”，已放入正确平台的模型库；平台密钥仍只需配置一次。`);
+      return;
+    }
+    const classified = classifyProviderModel(id);
+    const existing = selectedOnlineProviderModels.find((model) => model.id === id);
+    const model = existing || classified;
+    const detectedModels = [
+      ...(selectedOnlineProvider.detectedModels || []).filter((item) => item.id !== id),
+      model,
+    ];
+    updateOnlineProviderConfig({
+      model: selectedOnlineProvider.model || id,
+      detectedModels,
+      capabilities: [...new Set([...(selectedOnlineProvider.capabilities || []), ...capabilitiesForModel(model)])],
+    });
+    setProviderModelDraft(id);
+    setMessage(`已把“${id}”加入“${onlineConfigProvider}”模型库；接口地址和密钥将由全部节点共用。`);
+  };
+  const removeProviderModel = (id: string) => {
+    const detectedModels = (selectedOnlineProvider.detectedModels || []).filter((model) => model.id !== id);
+    const nextDefault = selectedOnlineProvider.model === id ? detectedModels[0]?.id || "" : selectedOnlineProvider.model;
+    const capabilities = [...new Set(detectedModels.flatMap(capabilitiesForModel))];
+    updateOnlineProviderConfig({ detectedModels, model: nextDefault, capabilities });
+    if (providerModelDraft === id) setProviderModelDraft(nextDefault);
+    setMessage(`已从“${onlineConfigProvider}”移除模型“${id}”；平台接口和密钥保持不变。`);
+  };
+  const setDefaultProviderModel = (id: string) => {
+    updateOnlineProviderConfig({ model: id });
+    setProviderModelDraft(id);
+    setMessage(`已将“${id}”设为“${onlineConfigProvider}”默认模型。`);
+  };
+  const openOnlineConfiguration = (_tab: "byok" | "cloud", provider?: string) => {
     if (provider && onlineProviderNames.includes(provider)) setOnlineConfigProvider(provider);
-    setOnlineConfigTab(tab);
+    setOnlineConfigTab("byok");
     setOnlineApiOpen(true);
   };
   const addCustomProvider = () => {
     const name = customProviderName.trim();
     if (!name) { setMessage("请填写平台名称"); return; }
-    setOnlineProviderConfigs((current) => ({ ...current, [name]: current[name] || { endpoint: "", apiKey: "", model: "", custom: true, detectedModels: [] } }));
+    setOnlineProviderConfigs((current) => ({ ...current, [name]: current[name] || { endpoint: "", apiKey: "", model: "", protocol: "openai", capabilities: ["text"], custom: true, detectedModels: [] } }));
     setOnlineConfigProvider(name);
     setCustomProviderName("");
     setAddingCustomProvider(false);
@@ -557,14 +1268,107 @@ export default function App() {
     setDiscoveringModels(true);
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const ids = await invoke<string[]>("discover_api_models", { endpoint: selectedOnlineProvider.endpoint, apiKey: selectedOnlineProvider.apiKey || "" });
-      const detectedModels = ids.map(classifyProviderModel);
+      const ids = await invoke<string[]>("discover_api_models", { provider: onlineConfigProvider, endpoint: selectedOnlineProvider.endpoint, apiKey: selectedOnlineProvider.apiKey || "" });
+      const detectedModels = [...(selectedOnlineProvider.detectedModels || [])];
+      ids.map(classifyProviderModel).forEach((model) => {
+        const existing = detectedModels.findIndex((item) => item.id === model.id);
+        if (existing >= 0) detectedModels[existing] = model;
+        else detectedModels.push(model);
+      });
       const preferred = detectedModels.find((model) => model.kind === "video") || detectedModels.find((model) => model.kind !== "unknown");
-      updateOnlineProviderConfig({ detectedModels, model: preferred?.id || selectedOnlineProvider.model });
+      const defaultModel = selectedOnlineProvider.model || preferred?.id || "";
+      updateOnlineProviderConfig({ detectedModels, model: defaultModel });
+      setProviderModelDraft(defaultModel);
       setMessage(`已识别 ${ids.length} 个模型：文本 ${detectedModels.filter((item) => item.kind === "text").length}、图片 ${detectedModels.filter((item) => item.kind === "image").length}、视频 ${detectedModels.filter((item) => item.kind === "video").length}`);
     } catch (error) {
       setMessage(`模型识别失败：${String(error).replace(/^Error: /, "")}`);
     } finally { setDiscoveringModels(false); }
+  };
+  const testOnlineProvider = async () => {
+    if (!selectedOnlineProvider.endpoint?.trim()) { setProviderTestResult({ ok: false, text: "请先填写接口地址。" }); return; }
+    if (onlineConfigProvider !== "Ollama（本地）" && !selectedOnlineProvider.apiKey?.trim()) { setProviderTestResult({ ok: false, text: "请先填写 API Key 或 Access Key。" }); return; }
+    if (onlineConfigProvider === "可灵 Kling" && selectedOnlineProvider.klingAuth === "aksk" && !selectedOnlineProvider.apiSecret?.trim()) { setProviderTestResult({ ok: false, text: "AK/SK 签名方式还需要填写 Secret Key。" }); return; }
+    setTestingProvider(true);
+    setProviderTestResult(null);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const result = await invoke<{ provider: string; detail: string; model?: string }>("test_provider_connection", {
+        provider: onlineConfigProvider,
+        endpoint: selectedOnlineProvider.endpoint,
+        apiKey: selectedOnlineProvider.apiKey,
+        apiSecret: selectedOnlineProvider.apiSecret || null,
+        model: selectedOnlineProvider.model || "",
+      });
+      setProviderTestResult({ ok: true, text: result.detail });
+      // A saved connection must be immediately usable by node composers. For
+      // providers which expose a model list, refresh it here instead of asking
+      // the user to classify or manually register model IDs in a second step.
+      if (!["可灵 Kling", "豆包·火山方舟", "Google Nano Banana"].includes(onlineConfigProvider)) {
+        await discoverProviderModels();
+      }
+      setMessage(`${result.provider} 连接测试通过`);
+    } catch (error) {
+      const text = humanizeApiError(error);
+      setProviderTestResult({ ok: false, text });
+      setMessage(`连接测试失败：${text}`);
+    } finally {
+      setTestingProvider(false);
+    }
+  };
+  const setConfiguredModelCapability = (capability: ModelCapability, enabled: boolean) => {
+    const id = normalizeExplicitProviderModelId(providerModelDraft);
+    if (!id) return;
+    const targetProvider = providerForExplicitModelId(id);
+    if (targetProvider && targetProvider !== onlineConfigProvider && !selectedOnlineProvider.custom) {
+      setMessage(`“${id}”属于“${targetProvider}”，请先点击“加入模型库”，系统会切换到正确平台。`);
+      return;
+    }
+    const classified = classifyProviderModel(id);
+    const existing = selectedOnlineProviderModels.find((model) => model.id === id);
+    const currentCapabilities = capabilitiesForModel(existing || classified);
+    const nextCapabilities = enabled
+      ? [...new Set([...currentCapabilities, capability])]
+      : currentCapabilities.filter((item) => item !== capability);
+    const primaryKind = existing?.kind !== "unknown" && existing?.kind && nextCapabilities.includes(existing.kind)
+      ? existing.kind
+      : nextCapabilities[0] || "unknown";
+    const detectedModel: DetectedProviderModel = {
+      ...classified,
+      ...existing,
+      id,
+      kind: primaryKind,
+      capabilities: nextCapabilities,
+      purpose: nextCapabilities.length
+        ? `${nextCapabilities.map(modelCapabilityLabel).join(" / ")}生成模型`
+        : "用途待确认，不会自动用于生成",
+    };
+    const detectedModels = [
+      ...(selectedOnlineProvider.detectedModels || []).filter((model) => model.id !== id),
+      detectedModel,
+    ];
+    const capabilities = [...new Set(detectedModels.flatMap(capabilitiesForModel))];
+    updateOnlineProviderConfig({ detectedModels, capabilities, model: selectedOnlineProvider.model || id });
+  };
+  const addMcpServer = () => {
+    const id = newId();
+    const server: McpServerConfig = { id, name: "新 MCP 服务", endpoint: "http://127.0.0.1:3000/mcp", token: "", enabled: true, tools: [] };
+    setMcpServers((current) => [...current, server]);
+    setActiveMcpServer(id);
+  };
+  const updateMcpServer = (id: string, patch: Partial<McpServerConfig>) => setMcpServers((current) => current.map((server) => server.id === id ? { ...server, ...patch } : server));
+  const testMcpServer = async (server: McpServerConfig) => {
+    if (!server.endpoint.trim()) { setMessage("请先填写 MCP Streamable HTTP 地址"); return; }
+    setTestingMcp(true);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const result = await invoke<{ server_name: string; protocol_version: string; tools: McpToolInfo[] }>("test_mcp_server", { endpoint: server.endpoint, token: server.token || null });
+      updateMcpServer(server.id, { name: server.name === "新 MCP 服务" ? result.server_name : server.name, tools: result.tools, lastStatus: `已连接 · ${result.protocol_version} · ${result.tools.length} 个工具` });
+      setMessage(`MCP 已连接，发现 ${result.tools.length} 个工具`);
+    } catch (error) {
+      const detail = humanizeApiError(error);
+      updateMcpServer(server.id, { lastStatus: `连接失败 · ${detail}` });
+      setMessage(`MCP 连接失败：${detail}`);
+    } finally { setTestingMcp(false); }
   };
   const cloudConfigured = Boolean(cloudSettings.endpoint.trim() && cloudSettings.accessToken.trim());
 
@@ -587,7 +1391,9 @@ export default function App() {
           mediaHeight: inferred === "audio" ? undefined : node.mediaHeight,
         };
       });
-      return changed ? { ...current, nodes } : current;
+      const next = changed ? { ...current, nodes } : current;
+      if (next !== current) projectRef.current = next;
+      return next;
     });
   }, []);
   const drag = useRef<{
@@ -602,14 +1408,24 @@ export default function App() {
     sourceId?: string;
     groupBounds?: { minX: number; minY: number; maxX: number; maxY: number };
     isGroupDrag?: string;
-  startBounds?: { x: number; y: number; w: number; h: number };
+    startBounds?: { x: number; y: number; w: number; h: number };
+    startProject: Project;
   } | null>(null);
   const marquee = useRef<{ x: number; y: number } | null>(null);
+  const marqueeIncludesLinks = useRef(false);
   const lineMarquee = useRef<{ x: number; y: number } | null>(null);
   const pendingChange = useRef<((project: Project) => Project) | null>(null);
   const frame = useRef<number | null>(null);
+  const autoConnectSequence = useRef(0);
+  // FileReader callbacks are asynchronous too. A later project switch or a
+  // second import must make an earlier selected JSON file harmless.
+  const projectImportSequence = useRef(0);
+  const activeProjectImportReader = useRef<FileReader | null>(null);
   const undoHistory = useRef<Project[]>([]);
-  const cancelledRuns = useRef(new Set<string>());
+  // All asynchronous adapters share this registry. A completion may only
+  // mutate the canvas while its exact project/node/run token is still active.
+  const runRegistry = useRef(createRunRegistry());
+  const activeProjectIdRef = useRef(historyId);
   const linking = useRef<{ from: string; x: number; y: number; side: "in" | "out" } | null>(null);
   const [draftLink, setDraftLink] = useState<{
     from: string;
@@ -638,74 +1454,221 @@ export default function App() {
     null,
   );
   const pastePoint = useRef<{ x: number; y: number } | null>(null);
-  useEffect(() => {
+
+  /**
+   * A project import is a document-level operation. Abort the old reader when
+   * a newer file is selected or the active document changes; the sequence
+   * check remains as a second guard because FileReader abort events are async.
+   */
+  const invalidatePendingProjectImport = () => {
+    projectImportSequence.current += 1;
+    const reader = activeProjectImportReader.current;
+    activeProjectImportReader.current = null;
+    if (reader?.readyState === FileReader.LOADING) reader.abort();
+  };
+  /**
+   * Apply the final drag/pan/resize frame before a synchronous save. React may
+   * not render that frame before a close event, but the ref is the snapshot
+   * persisted by the project repository.
+   */
+  const flushPendingFrameChange = () => {
+    if (frame.current !== null) window.cancelAnimationFrame(frame.current);
+    frame.current = null;
+    const pending = pendingChange.current;
+    pendingChange.current = null;
+    if (!pending) return projectRef.current;
+    const updated = pending(projectRef.current);
+    projectRef.current = updated;
+    setProject(updated);
+    return updated;
+  };
+  const persistProjectSnapshot = (
+    snapshot: Project,
+    id = historyIdRef.current,
+    name = projectNameRef.current,
+    announce = false,
+  ) => {
+    const record: HistoryProject = {
+      id,
+      name: name.trim() || "未命名项目",
+      updatedAt: Date.now(),
+      project: safeProject(snapshot),
+    };
     try {
-      localStorage.setItem(STORE, JSON.stringify(safeProject(project)));
-      setMessage("已离线保存");
+      // A switch must never depend on the next debounce tick to protect the
+      // user's most recent edit. The repository keeps the document, active
+      // pointer and small index ordered; only documents intentionally pushed
+      // beyond the history cap may be removed, and only after a successful
+      // index write.
+      const saved = saveProjectWorkspace(localStorage, record, historyProjectsRef.current);
+      historyProjectsRef.current = saved.records;
+      setHistoryProjects(saved.records);
+      if (announce) setMessage("已离线保存");
+      return true;
     } catch {
-      setMessage("媒体较大：请用“导出项目”完整保存");
+      if (announce) setMessage("媒体较大：自动保存空间不足，请立即使用“导出项目”完整保存");
+      return false;
     }
-  }, [project]);
+  };
+  const flushActiveProjectSave = () =>
+    persistProjectSnapshot(flushPendingFrameChange(), historyIdRef.current, projectNameRef.current);
+  /**
+   * Atomically retire the old project's asynchronous work before React shows a
+   * different document.  Updating the refs synchronously closes the small
+   * window between an event handler calling setProject/setHistoryId and the
+   * next render, where a slow network/FileReader result used to write into the
+   * newly selected project.
+  */
+  const activateProjectIdentity = (nextId: string, nextName: string, nextProject: Project) => {
+    const previousId = historyIdRef.current;
+    // Treat every activation as an execution boundary. All current callers
+    // switch ids, but retaining this invariant also protects a future
+    // “reload this project” action from accepting a stale result.
+    runRegistry.current.invalidateProject(previousId);
+    invalidatePendingProjectImport();
+    // A drag/resize/pan update is scheduled on the next animation frame. It
+    // belongs to the document in which the gesture began, never to the next
+    // project selected before that frame has run.
+    if (frame.current !== null) window.cancelAnimationFrame(frame.current);
+    frame.current = null;
+    pendingChange.current = null;
+    drag.current = null;
+    moving.current = null;
+    marquee.current = null;
+    marqueeIncludesLinks.current = false;
+    lineMarquee.current = null;
+    linking.current = null;
+    setDraftLink(null);
+    legacyMigrationSequence.current += 1;
+    setLegacyMigrationProgress((current) => current.running
+      ? { ...current, running: false, current: "已因项目切换停止" }
+      : current);
+    activeProjectIdRef.current = nextId;
+    historyIdRef.current = nextId;
+    projectNameRef.current = nextName;
+    projectRef.current = nextProject;
+  };
+  const canCommitRun = (token: RunToken) =>
+    activeProjectIdRef.current === token.projectId &&
+    runRegistry.current.canCommit(token.projectId, token.nodeId, token.runId) &&
+    projectRef.current.nodes.some((node) => node.id === token.nodeId);
+  /**
+   * A run owns both a node token and the exact graph inputs it was submitted
+   * with.  Stopping/restarting/switching projects is handled by RunRegistry;
+   * this extra check covers a different case: the user edits the prompt,
+   * reference media, upstream text or bound workflow while a provider is
+   * still working.  That old result must never overwrite the edited card.
+   */
+  const canCommitRunWithInputs = (token: RunToken, inputSignature: string) => {
+    if (!canCommitRun(token)) return false;
+    if (createExecutionInputSignature(projectRef.current, token.nodeId) === inputSignature) return true;
+
+    // Cancel only this exact token.  If the user has already started a newer
+    // run, RunRegistry rejects the cancellation and we leave its UI untouched.
+    if (runRegistry.current.cancel(token.projectId, token.nodeId, token.runId)) {
+      setRuntimeNodeStatus(token.nodeId, "idle");
+      addLog(`已丢弃 ${token.nodeId} 的旧生成结果：运行期间输入、参考素材或工作流已变更`);
+      setMessage("生成期间已修改提示词、参考素材或工作流，旧结果已丢弃；请重新生成。");
+    }
+    return false;
+  };
+  const resetProjectSession = () => {
+    // None of these UI handles describe the next document. Keeping even one
+    // of them alive can make an old node id receive edits or diagnostics after
+    // a history/open/import transition.
+    setSelected([]);
+    setSelectedLinks([]);
+    setClipboard([]);
+    setRecent([]);
+    setRecentOpen(false);
+    setActiveText(null);
+    setActiveStoryboard(null);
+    setActiveAiNode(null);
+    setActiveOnlineVideo(null);
+    setActiveApiConfig(null);
+    setApiPoint(null);
+    setMediaTarget(null);
+    setExternalTextTarget(null);
+    setDropTextTarget(null);
+    setMediaPickerText(null);
+    setEditingAnnotation(null);
+    setPreviewImage(null);
+    setStoryboardPaste("");
+    setSelectionBox(null);
+    setLineSelectionBox(null);
+    setPanning(false);
+    setOnlinePopover(null);
+    setAtReferenceMenu(null);
+    setPromptLibraryText("");
+    setGroupNameInput(null);
+    setMenu(null);
+    setDisconnectMenu(null);
+    setLinkAddMenu(null);
+    setMediaLibraryOpen(false);
+    setDirectorOpen(false);
+    setWorkflowLibraryOpen(false);
+    setComfyDiagnostics({});
+    setExpandedComfyDiagnostics(null);
+    setLogs([]);
+    setLogsOpen(false);
+    setSettings(false);
+    setPreferences(false);
+    setOnlineApiOpen(false);
+    setCloudPointsOpen(false);
+    setProviderTestResult(null);
+    setTopMenuOpen(false);
+    setCanvasShortcutsOpen(false);
+    setNavOpen(false);
+    setStudioOpen(false);
+    setCinematicLandingOpen(false);
+  };
   useEffect(() => {
-    if (intro !== "animating") return;
-    try {
-      const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (AudioContextClass) {
-        const audio = new AudioContextClass();
-        const oscillator = audio.createOscillator();
-        const gain = audio.createGain();
-        oscillator.type = "sine";
-        oscillator.frequency.setValueAtTime(392, audio.currentTime);
-        oscillator.frequency.exponentialRampToValueAtTime(784, audio.currentTime + 0.34);
-        gain.gain.setValueAtTime(0.0001, audio.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.055, audio.currentTime + 0.04);
-        gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.48);
-        oscillator.connect(gain).connect(audio.destination);
-        oscillator.start();
-        oscillator.stop(audio.currentTime + 0.5);
-        oscillator.onended = () => audio.close();
-      }
-    } catch {}
-    const timer = window.setTimeout(() => setIntro("ready"), 1450);
-    return () => window.clearTimeout(timer);
-  }, [intro]);
+    activeProjectIdRef.current = historyId;
+    undoHistory.current = [];
+  }, [historyId]);
+  useEffect(() => {
+    // Save on a fixed wall-clock cadence. Refs always point at the active
+    // project, so continuous editing cannot postpone the ten-minute save and
+    // switching projects cannot make the timer write an old document.
+    const timer = window.setInterval(() => {
+      void persistProjectSnapshot(
+        flushPendingFrameChange(),
+        historyIdRef.current,
+        projectNameRef.current,
+        true,
+      );
+    }, OFFLINE_AUTOSAVE_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    // `pagehide` covers the desktop WebView closing path and `beforeunload`
+    // covers browser development mode. Both handlers are synchronous by
+    // design: localStorage is the last reliable point before the process exits.
+    const flushBeforeLeaving = () => {
+      flushActiveProjectSave();
+    };
+    window.addEventListener("pagehide", flushBeforeLeaving);
+    window.addEventListener("beforeunload", flushBeforeLeaving);
+    return () => {
+      window.removeEventListener("pagehide", flushBeforeLeaving);
+      window.removeEventListener("beforeunload", flushBeforeLeaving);
+    };
+  }, []);
   useEffect(() => {
     localStorage.setItem("comfy-bridge", apiUrl);
   }, [apiUrl]);
   useEffect(() => {
-    localStorage.setItem("ym-intro-enabled", String(introEnabled));
-  }, [introEnabled]);
-  useEffect(() => {
     localStorage.setItem("ym-default-save-dir", defaultSaveDir);
   }, [defaultSaveDir]);
-  useEffect(() => {
-    localStorage.setItem("ym-theme", theme);
-  }, [theme]);
   useEffect(() => {
     localStorage.setItem(ONLINE_PROVIDER_STORE, JSON.stringify(onlineProviderConfigs));
   }, [onlineProviderConfigs]);
   useEffect(() => {
+    localStorage.setItem(MCP_SERVER_STORE, JSON.stringify(mcpServers));
+  }, [mcpServers]);
+  useEffect(() => {
     localStorage.setItem(CLOUD_STORE, JSON.stringify(cloudSettings));
   }, [cloudSettings]);
-  useEffect(() => {
-    localStorage.setItem("ym-active-project", historyId);
-    setHistoryProjects((current) => {
-      const record: HistoryProject = {
-        id: historyId,
-        name: `项目 ${new Date().toLocaleDateString("zh-CN")}`,
-        updatedAt: Date.now(),
-        project: safeProject(project),
-      };
-      return [record, ...current.filter((item) => item.id !== historyId)].slice(0, 12);
-    });
-  }, [project, historyId]);
-  useEffect(() => {
-    try {
-      localStorage.setItem(HISTORY_STORE, JSON.stringify(historyProjects));
-    } catch {
-      // 历史中的大媒体无法写入本地时，当前项目仍可继续使用和导出。
-    }
-  }, [historyProjects]);
   useEffect(() => {
     const clear = () => {
       setMenu(null);
@@ -745,11 +1708,11 @@ export default function App() {
     [project.nodes, activeText],
   );
   const activeOnlineVideoNode = useMemo(
-    () => project.nodes.find((node) => node.id === activeOnlineVideo && node.kind === "onlineVideo") || null,
+    () => project.nodes.find((node) => node.id === activeOnlineVideo && (node.kind === "onlineVideo" || node.kind === "video")) || null,
     [project.nodes, activeOnlineVideo],
   );
   const activeAiNodeItem = useMemo(
-    () => project.nodes.find((node) => node.id === activeAiNode && (node.kind === "aiText" || node.kind === "aiImage")) || null,
+    () => project.nodes.find((node) => node.id === activeAiNode && (node.kind === "aiText" || node.kind === "aiImage" || node.kind === "text" || node.kind === "image")) || null,
     [project.nodes, activeAiNode],
   );
   const activeComfyApiNode = useMemo(
@@ -762,6 +1725,14 @@ export default function App() {
       .map((link) => project.nodes.find((node) => node.id === link.from))
       .filter((node): node is NodeItem => Boolean(node?.kind === "image" && node.src))
       .map((node) => ({ id: node.id, name: node.name, src: node.src! })) : [],
+    [project.links, project.nodes, activeAiNodeItem],
+  );
+  const activeAiLinkedTextInputs = useMemo(
+    () => activeAiNodeItem ? project.links
+      .filter((link) => link.to === activeAiNodeItem.id)
+      .map((link) => project.nodes.find((node) => node.id === link.from))
+      .map((node) => node?.kind === "text" ? node.text || "" : node?.kind === "storyboard" ? storyboardText(node.storyboard) : "")
+      .filter((text) => text.trim()) : [],
     [project.links, project.nodes, activeAiNodeItem],
   );
   const canvasAiImages = useMemo(
@@ -811,13 +1782,140 @@ export default function App() {
           // 在每一次移动节点时被完整序列化，造成素材库和画布卡顿。
           current,
         ];
+        projectRef.current = next;
       }
       return next;
     });
+  // Loading/error labels belong to a running task, not to the user's edit
+  // history.  Keeping them out of `change()` prevents Ctrl+Z from restoring a
+  // stale “running” card after a task has already completed or been stopped.
+  const setRuntimeNodeStatus = (nodeId: string, status: NodeItem["status"]) =>
+    setProject((current) => {
+      let changed = false;
+      const nodes = current.nodes.map((node) => {
+        if (node.id !== nodeId || node.status === status) return node;
+        changed = true;
+        return { ...node, status };
+      });
+      const next = changed ? { ...current, nodes } : current;
+      if (next !== current) projectRef.current = next;
+      return next;
+    });
+  /**
+   * The renderer can draw a link before a provider has a chance to consume it.
+   * Keep the graph contract at the execution boundary too: otherwise an old
+   * project or an imported workflow can still submit an orphaned/mismatched
+   * connection even though new links are checked when they are created.
+   */
+  const validateExecutionGraph = (nodeId: string, actionLabel: string, projectSnapshot: Project = projectRef.current) => {
+    const plan = planExecution(projectSnapshot, { scope: "single", nodeId });
+    const relevantNodeIds = new Set([nodeId, ...plan.upstreamNodeIds]);
+    const relevantIssues = plan.issues.filter((issue) => relevantNodeIds.has(issue.nodeId));
+    const blockingIssues = relevantIssues.filter((issue) => issue.severity === "error");
+    const issuesByNode = new Map<string, ExecutionPlanIssue[]>();
+    blockingIssues.forEach((issue) => {
+      const current = issuesByNode.get(issue.nodeId) || [];
+      current.push(issue);
+      issuesByNode.set(issue.nodeId, current);
+    });
+
+    // Graph preflight feedback is transient state, not an edit the user should
+    // need to undo.  It is deliberately stored with the project only so the
+    // affected cards turn red and explain the exact repair point.
+    setProject((current) => {
+      let changed = false;
+      const nodes = current.nodes.map((candidate) => {
+        if (!relevantNodeIds.has(candidate.id)) return candidate;
+        const nextErrors = [
+          ...withoutExecutionValidationErrors(candidate.validationErrors),
+          ...(issuesByNode.get(candidate.id) || []).map(
+            (issue) => `${EXECUTION_VALIDATION_PREFIX}${executionPlanIssueText(issue)}`,
+          ),
+        ];
+        const previous = candidate.validationErrors || [];
+        if (previous.length === nextErrors.length && previous.every((entry, index) => entry === nextErrors[index])) {
+          return candidate;
+        }
+        changed = true;
+        return { ...candidate, validationErrors: nextErrors };
+      });
+      const next = changed ? { ...current, nodes } : current;
+      if (next !== current) projectRef.current = next;
+      return next;
+    });
+
+    if (!plan.blockedNodeIds.includes(nodeId)) {
+      relevantIssues
+        .filter((issue) => issue.severity === "warning")
+        .forEach((issue) => addLog(`${actionLabel}运行前检查：${executionPlanIssueText(issue)}`));
+      return true;
+    }
+
+    const targetIssue = blockingIssues.find((issue) => issue.nodeId === nodeId) || blockingIssues[0];
+    const detail = targetIssue
+      ? executionPlanIssueText(targetIssue)
+      : "存在未修复的连线或上游依赖。";
+    addLog(`${actionLabel}运行前检查未通过：${detail}`);
+    setMessage(`${actionLabel}未提交：${detail}`);
+    return false;
+  };
+  const connectCanvasNodes = (
+    from: string,
+    to: string,
+    options: NewLinkOptions = {},
+  ) => {
+    const proposal = appendTypedLink(project, from, to, options);
+    if (proposal.issues.length) {
+      const detail = graphIssueText(proposal.issues);
+      setProject((current) => {
+        const next = {
+          ...current,
+          nodes: current.nodes.map((node) => node.id === to
+            ? {
+                ...node,
+                validationErrors: [
+                  ...(node.validationErrors || []).filter((entry) => !entry.startsWith(GRAPH_VALIDATION_PREFIX)),
+                  `${GRAPH_VALIDATION_PREFIX}${detail}`,
+                ],
+              }
+            : node),
+        };
+        projectRef.current = next;
+        return next;
+      });
+      setMessage(`无法连接：${detail}`);
+      return false;
+    }
+    change((current) => {
+      const clean = {
+        ...current,
+        nodes: current.nodes.map((node) => node.id === to
+          ? {
+              ...node,
+              validationErrors: (node.validationErrors || []).filter((entry) => !entry.startsWith(GRAPH_VALIDATION_PREFIX)),
+            }
+          : node),
+      };
+      return appendTypedLink(clean, from, to, options).project;
+    });
+    setMessage("节点已按数据类型连接");
+    return true;
+  };
   const undo = () => {
+    // Do not let a drag frame queued just before Ctrl+Z run after the restored
+    // snapshot and appear as an unexplained extra move.
+    flushPendingFrameChange();
     const previous = undoHistory.current.pop();
     if (!previous) return;
-    setProject(previous);
+    // A saved edit snapshot must never resurrect an old asynchronous status.
+    // normalizeProject resets transient running/stopping states while keeping
+    // the user-authored nodes, links, groups and view intact.
+    // Undo changes the user's intended graph. Do not let an in-flight request
+    // from the graph we just reverted append an output afterward.
+    runRegistry.current.invalidateProject(activeProjectIdRef.current);
+    const restored = safeProject(previous);
+    projectRef.current = restored;
+    setProject(restored);
     setSelected([]);
     setMenu(null);
     setMessage("已撤销上一步操作");
@@ -908,7 +2006,13 @@ export default function App() {
       const next = pendingChange.current;
       pendingChange.current = null;
       frame.current = null;
-      if (next) setProject(next);
+      if (next) {
+        setProject((current) => {
+          const updated = next(current);
+          projectRef.current = updated;
+          return updated;
+        });
+      }
     });
   };
   const world = (clientX: number, clientY: number) => {
@@ -966,6 +2070,161 @@ export default function App() {
     setMessage("OpenAI 默认配置已保存，新节点会自动使用");
   };
   const addLog = (entry: string) => setLogs((items) => [`${new Date().toLocaleTimeString()}  ${entry}`, ...items].slice(0, 80));
+  const recoverComfyVideoPreview = async (node: NodeItem, source: string | undefined) => {
+    const descriptor = parseComfyViewSource(source);
+    if (!descriptor) {
+      if (node.mediaFallbackTried) return;
+      change((current) => ({
+        ...current,
+        nodes: current.nodes.map((item) => item.id === node.id ? {
+          ...item,
+          mediaFallbackTried: true,
+          validationErrors: [...new Set([...(item.validationErrors || []), "媒体预览无法读取：没有可恢复的 ComfyUI output 地址。"])],
+        } : item),
+      }));
+      setMessage("视频预览无法读取：该旧节点没有可恢复的 ComfyUI 输出地址，请重新生成或重新导入原文件。");
+      return;
+    }
+    const sourceProjectId = historyIdRef.current;
+    const recoveryKey = `${sourceProjectId}\u0000${node.id}\u0000${descriptor.sourceUrl}`;
+    if (mediaRecoveryAttempted.current.has(recoveryKey)) return;
+    mediaRecoveryAttempted.current.add(recoveryKey);
+    setMessage(`正在通过桌面后端恢复视频“${descriptor.filename}”…`);
+    try {
+      const recovered = await cacheComfyGeneratedMedia(descriptor.endpoint, descriptor, sourceProjectId);
+      if (!recovered?.localPath) throw new Error("桌面后端没有返回可播放的缓存路径");
+      if (historyIdRef.current !== sourceProjectId || !projectRef.current.nodes.some((item) => item.id === node.id)) {
+        if (recovered.managedAsset) await cleanupUnattachedWorkspaceAsset(recovered.managedAsset, []);
+        return;
+      }
+      change((current) => ({
+        ...current,
+        nodes: current.nodes.map((item) => item.id === node.id ? {
+          ...item,
+          src: recovered.src,
+          localPath: recovered.localPath,
+          fallbackSrc: descriptor.sourceUrl,
+          mediaFallbackTried: false,
+          validationErrors: (item.validationErrors || []).filter((error) => !error.startsWith("媒体预览无法读取")),
+        } : item),
+      }));
+      addLog(`ComfyUI 视频恢复：已通过桌面后端缓存 ${descriptor.filename}`);
+      setMessage(`视频“${descriptor.filename}”已恢复到本机素材库，画布将重新载入画面。`);
+    } catch (error) {
+      const detail = humanizeApiError(error);
+      change((current) => ({
+        ...current,
+        nodes: current.nodes.map((item) => item.id === node.id ? {
+          ...item,
+          mediaFallbackTried: true,
+          validationErrors: [...new Set([...(item.validationErrors || []).filter((message) => !message.startsWith("媒体预览无法读取")), `媒体预览无法读取：桌面后端恢复失败（${detail}）`])],
+        } : item),
+      }));
+      addLog(`ComfyUI 视频恢复失败：${detail}`);
+      setMessage(`视频恢复失败：${detail}`);
+    }
+  };
+  const legacyMigrationPlan = useMemo(
+    () => planLegacyMediaMigration(project, historyId),
+    [historyId, project],
+  );
+  const migrateLegacyMedia = async () => {
+    if (legacyMigrationProgress.running) return;
+    const plan = planLegacyMediaMigration(projectRef.current, historyIdRef.current);
+    if (!plan.items.length) {
+      setMessage("当前项目没有需要迁移的旧版内嵌媒体。");
+      setTopMenuOpen(false);
+      return;
+    }
+    if (!isTauri()) {
+      setMessage(`检测到 ${plan.items.length} 项旧版内嵌媒体。浏览器预览没有本机素材仓库，请用桌面开发版打开项目后再迁移。`);
+      setTopMenuOpen(false);
+      return;
+    }
+
+    const session = ++legacyMigrationSequence.current;
+    let completed = 0;
+    let failed = 0;
+    let skipped = 0;
+    setLegacyMigrationProgress({ running: true, total: plan.items.length, completed, failed, skipped, current: "准备迁移" });
+    setMessage(`开始迁移 ${plan.items.length} 项旧媒体；原内容会保留到每一项成功写入后。`);
+
+    for (let index = 0; index < plan.items.length; index += 1) {
+      const item = plan.items[index];
+      const isCurrentSession = () => legacyMigrationSequence.current === session;
+      if (!isCurrentSession() || activeProjectIdRef.current !== plan.projectId) {
+        skipped += plan.items.length - index;
+        break;
+      }
+      if (!canApplyLegacyMediaMigration(plan, activeProjectIdRef.current, projectRef.current, item)) {
+        skipped += 1;
+        setLegacyMigrationProgress({ running: true, total: plan.items.length, completed, failed, skipped, current: `已跳过：${item.label}` });
+        continue;
+      }
+
+      setLegacyMigrationProgress({ running: true, total: plan.items.length, completed, failed, skipped, current: item.label });
+      setMessage(`正在迁移 ${index + 1}/${plan.items.length}：${item.label}`);
+      let uploadedAsset: ManagedWorkspaceAsset | undefined;
+      try {
+        const asset = await uploadWorkspaceAsset({
+          projectId: plan.projectId,
+          assetId: `legacy-${newId()}`,
+          file: legacyDataUrlToBlob(item.dataUrl),
+          fileName: item.fileName,
+          mimeType: item.mimeType,
+        });
+        uploadedAsset = asset;
+        if (!asset.localPath) {
+          await cleanupUnattachedWorkspaceAsset(asset, [projectRef.current]);
+          uploadedAsset = undefined;
+          throw new Error("本机素材仓库没有返回文件路径");
+        }
+
+        // Upload completion is not permission to write. Re-check both the
+        // maintenance session and the exact source against the latest project.
+        if (!isCurrentSession() || !canApplyLegacyMediaMigration(plan, activeProjectIdRef.current, projectRef.current, item)) {
+          skipped += 1;
+          await cleanupUnattachedWorkspaceAsset(asset, [projectRef.current]);
+          uploadedAsset = undefined;
+          setLegacyMigrationProgress({ running: true, total: plan.items.length, completed, failed, skipped, current: `已拒绝过期回写：${item.label}` });
+          continue;
+        }
+
+        const applied = applyLegacyMediaMigration(projectRef.current, item, {
+          src: convertFileSrc(asset.localPath),
+          localPath: asset.localPath,
+          asset,
+        });
+        if (!applied.applied) {
+          skipped += 1;
+          await cleanupUnattachedWorkspaceAsset(asset, [projectRef.current]);
+          uploadedAsset = undefined;
+          continue;
+        }
+        projectRef.current = applied.project;
+        setProject(applied.project);
+        uploadedAsset = undefined;
+        completed += 1;
+      } catch (error) {
+        if (uploadedAsset) await cleanupUnattachedWorkspaceAsset(uploadedAsset, [projectRef.current]);
+        failed += 1;
+        addLog(`旧媒体迁移失败 · ${item.label}：${error instanceof Error ? error.message : String(error)}`);
+      }
+      setLegacyMigrationProgress({ running: true, total: plan.items.length, completed, failed, skipped, current: item.label });
+    }
+
+    const stillActive = legacyMigrationSequence.current === session && activeProjectIdRef.current === plan.projectId;
+    if (stillActive) {
+      const saved = persistProjectSnapshot(projectRef.current, plan.projectId, projectNameRef.current);
+      const remaining = planLegacyMediaMigration(projectRef.current, plan.projectId).items.length;
+      setLegacyMigrationProgress({ running: false, total: plan.items.length, completed, failed, skipped, current: "" });
+      setMessage(!saved
+        ? `旧媒体已迁入本机仓库，但项目快照仍因本机存储不足未保存。请不要关闭应用，先“导出项目”留底后再清理旧项目存储。`
+        : remaining === 0
+        ? `旧媒体迁移完成：成功 ${completed} 项${skipped ? `，跳过 ${skipped} 项` : ""}。项目现在只保存本机素材引用。`
+        : `旧媒体迁移完成：成功 ${completed} 项，失败 ${failed} 项，跳过 ${skipped} 项；仍有 ${remaining} 项，可再次点击迁移重试。`);
+    }
+  };
   const navigateFromMinimap = (event: React.MouseEvent<HTMLDivElement>) => {
     const map = event.currentTarget.getBoundingClientRect();
     const canvas = canvasRef.current?.getBoundingClientRect();
@@ -1011,6 +2270,69 @@ export default function App() {
     setSelected([item.id]);
     return item;
   };
+  const aiTextWorkflowFor = (outputMode: "script" | "storyboardFrames" = "script"): AiTextSettings => {
+    const connection = textProviderOptions[0];
+    return {
+      source: "byok", provider: connection?.name || "OpenAI", model: connection?.defaultModel || "gpt-4.1-mini",
+      genre: "剧情短片", format: "标准影视剧本", length: "中篇",
+      tone: "电影感", audience: "大众", language: "简体中文",
+      creativity: 0.8, episodeCount: 1, episodeMinutes: 5,
+      includeStoryboard: true, includeCharacters: true, outputMode,
+      storyboardRatio: "16:9", storyboardStyle: "电影写实",
+      storyboardFrames: [createStoryboardFramePlan(0)],
+    };
+  };
+  const openTextAiComposer = (nodeId: string, outputMode: "script" | "storyboardFrames") => {
+    change((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) => {
+        if (node.id !== nodeId) return node;
+        const stored = (node.workflow || {}) as AiTextSettings;
+        const workflow = node.workflow
+          ? {
+              ...aiTextWorkflowFor(outputMode),
+              ...stored,
+              outputMode,
+              storyboardFrames: normalizeStoryboardFramePlans(stored.storyboardFrames),
+            }
+          : aiTextWorkflowFor(outputMode);
+        return { ...node, workflow };
+      }),
+    }));
+    setActiveText(null);
+    setActiveStoryboard(null);
+    setActiveOnlineVideo(null);
+    setActiveAiNode(nodeId);
+  };
+  const addAiTextNode = (at: { x: number; y: number }) => {
+    return add("aiText", at, {
+    name: "AI 剧本生成",
+    workflow: aiTextWorkflowFor("script"),
+  });
+  };
+  const addAiImageNode = (at: { x: number; y: number }) => {
+    const connection = imageProviderOptions[0];
+    return add("aiImage", at, {
+    name: "AI 图片生成",
+    workflow: {
+      source: "byok", provider: connection?.name || "OpenAI", model: connection?.defaultModel || "gpt-image-1",
+      mode: "text", ratio: "1:1", resolution: "1024", amount: 1,
+      quality: "low", style: "电影写实", seed: -1, guidance: 7,
+    } satisfies AiImageSettings,
+  });
+  };
+  const addAiVideoNode = (at: { x: number; y: number }) => {
+    const provider = onlineVideoProviderNames[0] || "未选择平台";
+    const model = compatibleModelForProvider(provider, "video");
+    const capabilities = videoCapabilitiesFor(provider, model);
+    return add("onlineVideo", at, {
+    name: "AI 视频生成",
+    workflow: {
+      source: "byok", provider, model, mode: capabilities.modes[0], ratio: "16:9",
+      quality: "720P", duration: 5, amount: 1, audio: true,
+    } satisfies OnlineVideoSettings,
+  });
+  };
   const addLinkedNode = (kind: Exclude<Kind, "api">) => {
     const link = linkAddMenu;
     if (!link) return;
@@ -1021,13 +2343,15 @@ export default function App() {
       name: typeLabel[kind], status: "idle", storyboard,
       text: kind === "storyboard" ? storyboardText(storyboard) : undefined,
     };
-    change((p) => ({
-      ...p,
-      nodes: [...p.nodes, item],
-      links: [...p.links, link.side === "out"
-        ? { id: newId(), from: link.from, to: item.id }
-        : { id: newId(), from: item.id, to: link.from }],
-    }));
+    const candidate = { ...project, nodes: [...project.nodes, item] };
+    const from = link.side === "out" ? link.from : item.id;
+    const to = link.side === "out" ? item.id : link.from;
+    const connected = appendTypedLink(candidate, from, to);
+    if (connected.issues.length) {
+      setMessage(`无法添加并连接此节点：${graphIssueText(connected.issues)}`);
+      return;
+    }
+    change(() => connected.project);
     setSelected([item.id]);
     setLinkAddMenu(null);
   };
@@ -1036,9 +2360,19 @@ export default function App() {
     setMediaTarget(nodeId);
     fileRef.current?.click();
   };
+  const discardUnattachedImport = async (imported: ImportedWorkspaceMedia) => {
+    const result = await cleanupUnattachedWorkspaceAsset(
+      imported.managedAsset,
+      [projectRef.current],
+    );
+    return result.status === "failed"
+      ? " 新素材未能自动清理，请稍后在素材管理中重试。"
+      : "";
+  };
   const importOnlineReference = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     const targetId = activeOnlineVideo;
+    const sourceProjectId = historyIdRef.current;
     event.target.value = "";
     if (!file || !targetId) return;
     const kind = mediaKind(file);
@@ -1046,9 +2380,72 @@ export default function App() {
       setMessage("参考内容仅支持图片或视频文件。");
       return;
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const reference: OnlineReference = { id: newId(), name: file.name, kind, src: String(reader.result), source: "external" };
+    const targetNode = project.nodes.find((node) => node.id === targetId);
+    const targetConfig = (targetNode?.workflow || {}) as OnlineVideoSettings;
+    if ((targetConfig.source || "byok") === "byok") {
+      const savedProvider = onlineProviderConfigs[targetConfig.provider || ""];
+      const providerConfig = savedProvider
+        ? { ...ONLINE_PROVIDER_DEFAULTS[targetConfig.provider || ""], ...savedProvider }
+        : ONLINE_PROVIDER_DEFAULTS[targetConfig.provider || ""];
+      const model = compatibleModelForProvider(
+        targetConfig.provider || "",
+        "video",
+        targetConfig.model,
+        providerConfig?.model,
+      );
+      if (!model) {
+        setMessage(`“${targetConfig.provider || "当前平台"}”没有已确认的视频模型，不能添加视频生成参考。`);
+        return;
+      }
+      const capabilities = videoCapabilitiesFor(targetConfig.provider || "", model);
+      const normalized = normalizeVideoGenerationOptions(capabilities, {
+        mode: targetConfig.mode,
+        amount: targetConfig.amount,
+      });
+      const limit = videoInputLimitForMode(capabilities, normalized.mode);
+      const linkedImageIds = project.links
+        .filter((link) => link.to === targetId)
+        .map((link) => project.nodes.find((node) => node.id === link.from))
+        .filter((node): node is NodeItem => node?.kind === "image" && Boolean(node.src))
+        .map((node) => node.id);
+      // Canvas references are also persisted in `references`; count their IDs
+      // once so a first/last-frame request can still add its second image.
+      const imageReferenceIds = new Set([
+        ...linkedImageIds,
+        ...(targetConfig.references || [])
+          .filter((item) => item.kind === "image" && Boolean(item.src))
+          .map((item) => item.id),
+      ]);
+      if (kind !== "image") {
+        setMessage(`“${model || "未选择模型"}”当前只接收图片输入，不能添加视频参考。`);
+        return;
+      }
+      if (limit.maximum === 0 || imageReferenceIds.size >= limit.maximum) {
+        setMessage(`“${model || "未选择模型"}”的${videoModeLabel(normalized.mode)}最多接收 ${limit.maximum} 张图片；请切换模式或先移除已有参考。`);
+        return;
+      }
+    }
+    void (async () => {
+      let imported: ImportedWorkspaceMedia;
+      try {
+        imported = await storeMediaForProject(file, sourceProjectId);
+      } catch (error) {
+        setMessage(`无法添加参考“${file.name}”：${humanizeApiError(error)}`);
+        return;
+      }
+      if (historyIdRef.current !== sourceProjectId || !projectRef.current.nodes.some((node) => node.id === targetId)) {
+        const cleanupMessage = await discardUnattachedImport(imported);
+        setMessage(`已取消添加“${file.name}”：导入期间目标项目或节点已改变。${cleanupMessage}`);
+        return;
+      }
+      const reference: OnlineReference = {
+        id: newId(),
+        name: file.name,
+        kind,
+        src: imported.src,
+        localPath: imported.localPath,
+        source: "external",
+      };
       change((current) => ({
         ...current,
         nodes: current.nodes.map((node) => {
@@ -1058,21 +2455,61 @@ export default function App() {
         }),
       }));
       setMessage(`已添加外部参考：“${file.name}”。`);
+    })();
+  };
+  /**
+   * AI 文本/图片编辑器只负责选择参考图；真正的文件落盘必须由宿主
+   * 统一处理，避免它把整张图片编码进项目 JSON/localStorage。这里在
+   * 异步上传完成后再次确认项目与节点仍然是发起导入时的目标，过期
+   * 导入只会被丢弃，不会意外挂到后来切换的画布上。
+   */
+  const importAiReference = async (nodeId: string, file: File): Promise<AiReferenceImage> => {
+    const sourceProjectId = historyIdRef.current;
+    if (mediaKind(file) !== "image") {
+      throw new Error("AI 参考仅支持图片文件");
+    }
+    const imported = await storeMediaForProject(file, sourceProjectId);
+    if (
+      historyIdRef.current !== sourceProjectId ||
+      !projectRef.current.nodes.some((candidate) => candidate.id === nodeId)
+    ) {
+      const cleanupMessage = await discardUnattachedImport(imported);
+      throw new Error(`导入期间目标项目或节点已改变，参考图未挂入。${cleanupMessage}`);
+    }
+    return {
+      id: `reference-${newId()}`,
+      name: file.name,
+      src: imported.src,
+      localPath: imported.localPath,
     };
-    reader.readAsDataURL(file);
   };
   const importMedia = (e: ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     if (!f || !mediaTarget) return;
     const target = mediaTarget;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const src = String(reader.result);
+    const sourceProjectId = historyIdRef.current;
+    e.target.value = "";
+    const kind = pendingKind.current;
+    void (async () => {
+      let imported: ImportedWorkspaceMedia;
+      try {
+        imported = await storeMediaForProject(f, sourceProjectId);
+      } catch (error) {
+        setMediaTarget(null);
+        setMessage(`无法导入“${f.name}”：${humanizeApiError(error)}`);
+        return;
+      }
       const finish = () => {
-        setMessage("媒体已放入节点，导出项目时会一并保存");
+        setMessage(isTauri() ? "媒体已安全存入桌面工作区并放入节点" : "媒体已放入节点（浏览器预览模式仅保存小文件）");
         setMediaTarget(null);
       };
-      const apply = (mediaWidth: number, mediaHeight: number) => {
+      const apply = async (mediaWidth: number, mediaHeight: number) => {
+        if (historyIdRef.current !== sourceProjectId || !projectRef.current.nodes.some((node) => node.id === target)) {
+          setMediaTarget(null);
+          const cleanupMessage = await discardUnattachedImport(imported);
+          setMessage(`已取消导入“${f.name}”：导入期间目标项目或节点已改变。${cleanupMessage}`);
+          return;
+        }
         const scale = Math.min(480 / mediaWidth, 320 / mediaHeight, 1);
         const width = Math.max(160, Math.round(mediaWidth * scale));
         const height = Math.round((width * mediaHeight) / mediaWidth) + 29;
@@ -1084,7 +2521,8 @@ export default function App() {
                   ...n,
                   name: f.name,
                   fileName: f.name,
-                  src,
+                  src: imported.src,
+                  localPath: imported.localPath,
                   mediaWidth,
                   mediaHeight,
                   width,
@@ -1095,44 +2533,65 @@ export default function App() {
         }));
         finish();
       };
-      if (pendingKind.current === "image") {
+      if (kind === "image") {
         const image = new Image();
-        image.onload = () => apply(image.naturalWidth, image.naturalHeight);
-        image.src = src;
-      } else if (pendingKind.current === "video") {
+        image.onload = () => void apply(image.naturalWidth, image.naturalHeight);
+        image.onerror = () => void apply(320, 220);
+        image.src = imported.src;
+      } else if (kind === "video") {
         const video = document.createElement("video");
-        video.onloadedmetadata = () =>
-          apply(video.videoWidth, video.videoHeight);
-        video.src = src;
+        video.onloadedmetadata = () => void apply(video.videoWidth, video.videoHeight);
+        video.onerror = () => void apply(320, 220);
+        video.src = imported.src;
       } else {
+        if (historyIdRef.current !== sourceProjectId || !projectRef.current.nodes.some((node) => node.id === target)) {
+          setMediaTarget(null);
+          const cleanupMessage = await discardUnattachedImport(imported);
+          setMessage(`已取消导入“${f.name}”：导入期间目标项目或节点已改变。${cleanupMessage}`);
+          return;
+        }
         change((p) => ({
           ...p,
           nodes: p.nodes.map((n) =>
-            n.id === target ? { ...n, name: f.name, fileName: f.name, src } : n,
+            n.id === target ? { ...n, name: f.name, fileName: f.name, src: imported.src, localPath: imported.localPath } : n,
           ),
         }));
         finish();
       }
-    };
-    reader.readAsDataURL(f);
-    e.target.value = "";
+    })();
   };
   const importApi = (e: ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     if (!f) return;
+    const sourceProjectId = historyIdRef.current;
     const reader = new FileReader();
     reader.onload = () => {
       try {
+        if (historyIdRef.current !== sourceProjectId) {
+          setMessage(`已取消导入“${f.name}”：读取期间已切换项目。`);
+          return;
+        }
+        const currentProject = projectRef.current;
         const rect = canvasRef.current?.getBoundingClientRect();
         const fallback = rect
           ? {
-              x: (rect.width / 2 - project.view.x) / project.view.zoom,
-              y: (rect.height / 2 - project.view.y) / project.view.zoom,
+              x: (rect.width / 2 - currentProject.view.x) / currentProject.view.zoom,
+              y: (rect.height / 2 - currentProject.view.y) / currentProject.view.zoom,
             }
           : { x: 410, y: 270 };
+        const workflow = JSON.parse(String(reader.result));
+        const kind = classifyProjectJson(workflow);
+        if (kind === "comfy-ui") {
+          setMessage("检测到这是 ComfyUI 编辑器工作流，不能作为 API 节点直接运行。请在 ComfyUI 中保存为 API 格式，或导入工作流库转换。");
+          return;
+        }
+        if (kind !== "comfy-api") {
+          setMessage("这个 JSON 不是可运行的 ComfyUI API 工作流；未向画布添加节点。");
+          return;
+        }
         add("api", apiPoint || fallback, {
           name: f.name.replace(/\.json$/i, ""),
-          workflow: JSON.parse(String(reader.result)),
+          workflow,
           status: "idle",
         });
         setApiPoint(null);
@@ -1154,13 +2613,6 @@ export default function App() {
     if (file.type.startsWith("audio/")) return "audio";
     return null;
   };
-  const readDataUrl = (file: File) =>
-    new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result));
-      reader.onerror = () => reject(reader.error);
-      reader.readAsDataURL(file);
-    });
   const measureMedia = (kind: Extract<Kind, "image" | "video">, src: string) =>
     new Promise<{ width: number; height: number }>((resolve) => {
       if (kind === "image") {
@@ -1182,9 +2634,17 @@ export default function App() {
     at: { x: number; y: number },
     textTarget?: string,
   ) => {
+    const sourceProjectId = historyIdRef.current;
     const kind = mediaKind(file);
     if (!kind) return;
-    const src = await readDataUrl(file);
+    let imported: ImportedWorkspaceMedia;
+    try {
+      imported = await storeMediaForProject(file, sourceProjectId);
+    } catch (error) {
+      setMessage(`无法导入素材“${file.name}”：${humanizeApiError(error)}`);
+      return;
+    }
+    const src = imported.src;
     let width = nodeSize[kind][0];
     let height = nodeSize[kind][1];
     let mediaWidth: number | undefined;
@@ -1207,19 +2667,35 @@ export default function App() {
       name: file.name,
       fileName: file.name,
       src,
+      localPath: imported.localPath,
       mediaWidth,
       mediaHeight,
       status: "idle",
       createdAt: Date.now(),
     };
-    change((current) => ({
-      ...current,
-      nodes: [...current.nodes, item],
-      links: textTarget
-        ? [...current.links, { id: newId(), from: item.id, to: textTarget }]
-        : current.links,
-    }));
-    if (textTarget) setMessage("已导入素材并连接到文本节点");
+    // FileReader/video metadata are asynchronous. Construct the new document
+    // from React's current state at commit time so a node/line added while the
+    // file was reading is never overwritten by an old `project` closure.
+    if (historyIdRef.current !== sourceProjectId) {
+      const cleanupMessage = await discardUnattachedImport(imported);
+      setMessage(`已取消导入“${file.name}”：读取期间已切换项目。${cleanupMessage}`);
+      return;
+    }
+    let linkIssues: ReturnType<typeof appendTypedLink>["issues"] = [];
+    change((current) => {
+      const candidate = { ...current, nodes: [...current.nodes, item] };
+      const linked = textTarget
+        ? appendTypedLink(candidate, item.id, textTarget)
+        : { project: candidate, issues: [] as ReturnType<typeof appendTypedLink>["issues"] };
+      linkIssues = linked.issues;
+      return linked.project;
+    });
+    if (textTarget) setMessage(linkIssues.length
+      ? `素材已导入，但无法连接：${graphIssueText(linkIssues)}`
+      : "已导入素材并连接到文本节点的参考插槽");
+    else setMessage(isTauri()
+      ? "素材已安全存入桌面工作区并添加到画布"
+      : "素材已添加到画布（浏览器预览模式仅保存小文件）");
   };
   const importExternalTextMedia = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1237,56 +2713,263 @@ export default function App() {
     setExternalTextTarget(null);
     e.target.value = "";
   };
-  const addDroppedApi = (file: File, at: { x: number; y: number }) => {
+  const addDroppedApiPayload = (
+    workflow: unknown,
+    fileName: string,
+    at: { x: number; y: number },
+    sourceProjectId: string,
+  ) => {
+    if (historyIdRef.current !== sourceProjectId) {
+      setMessage(`已取消导入“${fileName}”：读取期间已切换项目。`);
+      return;
+    }
+    if (classifyProjectJson(workflow) !== "comfy-api") {
+      setMessage("这个 JSON 不是可读取的 ComfyUI API 工作流");
+      return;
+    }
+    add("api", at, {
+      name: fileName.replace(/\.json$/i, ""),
+      workflow,
+      status: "idle",
+    });
+    setMessage("API 工作流已拖入画布");
+  };
+  /**
+   * Every file-open entry point funnels through this one path.  Dragging a
+   * project onto the canvas must receive the same migration, credential
+   * redaction, portability report and companion-library restoration as the
+   * regular “打开项目” file picker.
+   */
+  const openProjectPackage = (rawPackage: unknown, fallbackName: string, sourceLabel = "项目") => {
+    try {
+      const imported = redactProjectSecrets(rawPackage);
+      const p = imported.value as Record<string, any>;
+      const packageKind = classifyProjectJson(p);
+      if (packageKind !== "canvas") throw Error(projectImportKindMessage(packageKind));
+      if (p.__ymProjectPackage !== undefined && p.__ymProjectPackage !== 1 && p.__ymProjectPackage !== 2) {
+        throw Error(`该项目包版本（v${String(p.__ymProjectPackage)}）当前应用尚不支持。请升级亿幕画布后再导入，避免只恢复一部分数据。`);
+      }
+      // Normalize/migrate the actual canvas before portability inspection and
+      // persistence. The report, the document and the active view therefore
+      // all describe the same schema version instead of three subtly different
+      // snapshots of an old export.
+      const normalizedCanvas = safeProject({
+        nodes: p.nodes,
+        links: p.links || [],
+        view: p.view || { x: 190, y: 130, zoom: 1 },
+        groups: Array.isArray(p.groups) ? p.groups : [],
+      });
+      const normalizedPackage = {
+        ...p,
+        nodes: normalizedCanvas.nodes,
+        links: normalizedCanvas.links,
+        view: normalizedCanvas.view,
+        groups: normalizedCanvas.groups || [],
+      };
+      // Do not trust a manifest from an older export.  Check the actual JSON
+      // that is about to be stored on this computer instead.
+      const portability = analyzeProjectPortability(normalizedPackage);
+      if (portability.packageKind === "invalid") throw Error("invalid project");
+      const attention = portability.summary.requiresRebind + portability.summary.missing;
+      if (attention) {
+        const examples = portability.items
+          .filter((item) => item.status !== "portable")
+          .slice(0, 3)
+          .map((item) => `• ${item.label}：${item.message}`)
+          .join("\n");
+        if (!window.confirm(
+          `迁移检查发现 ${portability.summary.requiresRebind} 项需要重新绑定、${portability.summary.missing} 项缺失。\n` +
+          `不会伪造恢复本机文件或临时素材。\n\n${examples}${attention > 3 ? "\n• 其余项目将在打开后保留为待处理状态。" : ""}\n\n仍要导入吗？`,
+        )) return false;
+      }
+      if (!flushActiveProjectSave()) {
+        setMessage("当前项目未能离线保存，已取消打开新项目。请先导出当前项目或清理本机存储空间。");
+        return false;
+      }
+
+      const nextProjectId = newId();
+      const isPortablePackage = p.__ymProjectPackage === 1 || p.__ymProjectPackage === 2;
+
+      let nextProject = normalizedCanvas;
+      // Project packages can carry selected ComfyUI workflows.  The local
+      // library is shared by existing projects, so never let an imported ID
+      // overwrite a different local graph: isolate the imported workflow and
+      // rewrite only references inside the imported canvas before it is saved.
+      const workflowImport = isPortablePackage && Array.isArray(p.comfyWorkflows)
+        ? mergeImportedComfyWorkflows(p.comfyWorkflows, readComfyWorkflowLibrary(), nextProject)
+        : null;
+      if (workflowImport) nextProject = safeProject(workflowImport.project);
+      const nextProjectName = typeof p.projectName === "string" && p.projectName.trim()
+        ? p.projectName.trim()
+        : fallbackName.replace(/\.json$/i, "");
+      if (!persistProjectSnapshot(nextProject, nextProjectId, nextProjectName)) {
+        setMessage("导入项目无法写入本机存储，已保持当前项目不变。请先导出或清理本机存储空间后重试。");
+        return false;
+      }
+      // Import companion data only after the canvas document itself is safely
+      // present. These library keys are global, so restore every touched value
+      // if a quota failure happens midway; a failed import must not leave half
+      // of somebody else's workflow/prompt library behind.
+      let companionImportIssue = false;
+      if (isPortablePackage) {
+        const previousValues = new Map<string, string | null>();
+        const writeCompanion = (key: string, value: string) => {
+          if (!previousValues.has(key)) previousValues.set(key, localStorage.getItem(key));
+          localStorage.setItem(key, value);
+        };
+        try {
+          if (p.director && typeof p.director === "object") {
+            writeCompanion(`ym-director-editor-v3:${nextProjectId}`, JSON.stringify(p.director));
+          }
+          if (Array.isArray(p.directorAssets)) {
+            writeCompanion(`ym-director-assets-v1:${nextProjectId}`, JSON.stringify(p.directorAssets));
+          }
+          if (workflowImport && workflowImport.report.accepted > 0) {
+            writeCompanion(COMFY_WORKFLOW_STORE, JSON.stringify(workflowImport.merged));
+          }
+          if (Array.isArray(p.promptLibrary)) {
+            const currentPrompts = (() => {
+              try {
+                const value = JSON.parse(localStorage.getItem("yimu-prompt-library") || "[]");
+                return Array.isArray(value) ? value : [];
+              } catch {
+                return [];
+              }
+            })();
+            writeCompanion(
+              "yimu-prompt-library",
+              JSON.stringify([...new Set([...p.promptLibrary, ...currentPrompts])].slice(0, 96)),
+            );
+          }
+        } catch {
+          companionImportIssue = true;
+          previousValues.forEach((previous, key) => {
+            try {
+              if (previous === null) localStorage.removeItem(key);
+              else localStorage.setItem(key, previous);
+            } catch {
+              // The project document is already safe. A later import/export
+              // can recover it even when the companion store is out of space.
+            }
+          });
+        }
+      }
+      undoHistory.current = [];
+      activateProjectIdentity(nextProjectId, nextProjectName, nextProject);
+      setProject(nextProject);
+      setHistoryId(nextProjectId);
+      setProjectName(nextProjectName);
+      resetProjectSession();
+      const portabilityText = portability.summary.fullyPortable
+        ? "迁移检查：所有已声明依赖可恢复"
+        : `迁移检查：${portability.summary.requiresRebind} 项需重新绑定、${portability.summary.missing} 项缺失`;
+      const credentialText = imported.redactedPaths.length
+        ? `；为安全起见已忽略 ${imported.redactedPaths.length} 个项目内密钥/Token`
+        : "";
+      const workflowText = workflowImport && workflowImport.report.incomingTotal
+        ? `；工作流：新增 ${workflowImport.report.added} 个、复用 ${workflowImport.report.reused.length} 个${workflowImport.report.remapped.length ? `，已隔离 ${workflowImport.report.remapped.length} 个同名 ID` : ""}${workflowImport.report.skipped.length ? `，跳过 ${workflowImport.report.skipped.length} 个不完整/重复条目` : ""}`
+        : "";
+      setMessage(isPortablePackage
+        ? `${sourceLabel}已打开，${companionImportIssue ? "附带导演台/工作流未能保存，请清理存储后重新导入；" : "导演台与工作流已恢复；"}${portabilityText}${workflowText}${credentialText}`
+        : `旧版${sourceLabel}已打开；${portabilityText}${credentialText}`);
+      return true;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "";
+      const knownMessage = detail.startsWith("检测到这是 ComfyUI") ||
+        detail.startsWith("该项目包版本") ||
+        detail === "项目文件格式不正确";
+      setMessage(knownMessage ? detail : "项目文件格式不正确");
+      return false;
+    }
+  };
+
+  /**
+   * One guarded FileReader path for both the picker and a JSON dropped on the
+   * canvas. A late reader can neither activate an old project nor add an API
+   * node into a project selected after the read began.
+   */
+  const readProjectJsonFile = (
+    file: File,
+    onValue: (value: unknown, sourceProjectId: string) => void,
+  ) => {
+    const sourceProjectId = historyIdRef.current;
+    invalidatePendingProjectImport();
+    const importSequence = projectImportSequence.current;
     const reader = new FileReader();
+    activeProjectImportReader.current = reader;
+    const isCurrentRead = () =>
+      importSequence === projectImportSequence.current &&
+      sourceProjectId === historyIdRef.current;
+    const clearIfActive = () => {
+      if (activeProjectImportReader.current === reader) activeProjectImportReader.current = null;
+    };
     reader.onload = () => {
+      clearIfActive();
+      if (!isCurrentRead()) return;
       try {
-        add("api", at, {
-          name: file.name.replace(/\.json$/i, ""),
-          workflow: JSON.parse(String(reader.result)),
-          status: "idle",
-        });
-        setMessage("API 工作流已拖入画布");
+        onValue(JSON.parse(String(reader.result || "")), sourceProjectId);
       } catch {
-        setMessage("这个 JSON 不是可读取的 ComfyUI API 工作流");
+        setMessage(`无法打开“${file.name}”：项目文件不是有效 JSON。`);
       }
     };
+    reader.onerror = () => {
+      clearIfActive();
+      if (isCurrentRead()) setMessage(`无法读取“${file.name}”，请检查文件是否仍可访问。`);
+    };
+    reader.onabort = () => clearIfActive();
     reader.readAsText(file);
   };
   const openDroppedProject = (file: File, at: { x: number; y: number }) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const data = JSON.parse(String(reader.result));
-        if (Array.isArray(data.nodes)) {
-          setProject({
-            nodes: data.nodes,
-            links: data.links || [],
-            view: data.view || { x: 190, y: 130, zoom: 1 },
-          });
-          setHistoryId(newId());
-          setSelected([]);
-          setRecent([]);
-          setMessage("历史项目已从画布拖入并打开");
-          return;
-        }
-      } catch {
-        // 不是项目文件时，按 ComfyUI API 工作流继续导入。
+    readProjectJsonFile(file, (data, sourceProjectId) => {
+      const kind = classifyProjectJson(data);
+      if (kind === "canvas" || kind === "comfy-ui") {
+        // `openProjectPackage` owns migration, secret redaction, portability
+        // checks and the final synchronous flush. An editor workflow reaches
+        // the same path solely to receive its precise “not a project” hint.
+        openProjectPackage(data, file.name, "拖入的项目");
+        return;
       }
-      addDroppedApi(file, at);
-    };
-    reader.readAsText(file);
+      if (kind === "comfy-api") {
+        addDroppedApiPayload(data, file.name, at, sourceProjectId);
+        return;
+      }
+      setMessage("拖入的 JSON 既不是亿幕画布项目，也不是可读取的 ComfyUI API 工作流。");
+    });
   };
   const linkMediaToText = (sourceId: string, textId: string) => {
-    change((current) => ({
-      ...current,
-      links: current.links.some(
-        (link) => link.from === sourceId && link.to === textId,
-      )
-        ? current.links
-        : [...current.links, { id: newId(), from: sourceId, to: textId }],
-    }));
-    setMessage("素材已作为参考连接到文本节点");
+    if (project.links.some((link) => link.from === sourceId && link.to === textId)) {
+      setMessage("这张素材已经连接到文本节点");
+      return;
+    }
+    connectCanvasNodes(sourceId, textId, { toPort: "references" });
+  };
+  const removeAiReference = (nodeId: string, reference: AiReferenceImage) => {
+    change((current) => {
+      const links = current.links.filter((link) => !(link.from === reference.id && link.to === nodeId));
+      const hasLinkedImage = links
+        .filter((link) => link.to === nodeId)
+        .some((link) => current.nodes.some((node) => node.id === link.from && node.kind === "image" && Boolean(node.src)));
+      return {
+        ...current,
+        links,
+        nodes: current.nodes.map((node) => {
+          if (node.id !== nodeId) return node;
+          const workflow = (node.workflow && typeof node.workflow === "object" ? node.workflow : {}) as AiTextSettings & AiImageSettings;
+          const references = (workflow.references || []).filter((item) => item.id !== reference.id);
+          return {
+            ...node,
+            workflow: {
+              ...workflow,
+              references,
+              ...(node.kind === "image" || node.kind === "aiImage"
+                ? { mode: references.length || hasLinkedImage ? workflow.mode || "image" : "text" }
+                : {}),
+            },
+          };
+        }),
+      };
+    });
+    setMessage(`已移除参考“${reference.name}”并断开对应连线。`);
   };
   const updateStoryboardRow = (
     nodeId: string,
@@ -1299,21 +2982,17 @@ export default function App() {
       const rows = [...(node.storyboard || defaultStoryboard())];
       rows[rowIndex] = { ...rows[rowIndex], ...patch };
       const imageId = patch.imageId;
-      return {
+      const updated = {
         ...current,
         nodes: current.nodes.map((item) =>
           item.id === nodeId
             ? { ...item, storyboard: rows, text: storyboardText(rows) }
             : item,
         ),
-        links:
-          imageId &&
-          !current.links.some(
-            (link) => link.from === imageId && link.to === nodeId,
-          )
-            ? [...current.links, { id: newId(), from: imageId, to: nodeId }]
-            : current.links,
       };
+      return imageId && !current.links.some((link) => link.from === imageId && link.to === nodeId)
+        ? appendTypedLink(updated, imageId, nodeId, { toPort: "references" }).project
+        : updated;
     });
   };
   const addStoryboardRow = (nodeId: string) =>
@@ -1457,13 +3136,16 @@ export default function App() {
       },
     }));
   };
-  const canvasDown = (e: PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    const isGrp = !!(e.target as HTMLElement).closest(".node-group");
-    if (!isGrp && (e.target as HTMLElement).closest(".node,.menu,.topbar,.toolbar")) return;
+  const canvasDown = (e: PointerEvent<HTMLElement>) => {
+    if (e.button !== 0 && e.button !== 1) return;
+    const isMiddleMarquee = e.button === 1;
+    const target = e.target as HTMLElement;
+    const isGrp = !!target.closest(".node-group");
+    if (isMiddleMarquee && target.closest("button,input,textarea,select,.menu,.toolbar,.ai-composer,.online-video-composer")) return;
+    if (!isMiddleMarquee && !isGrp && target.closest(".node,.menu,.topbar,.toolbar")) return;
+    if (isMiddleMarquee) e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
-    if (isGrp) { setMenu(null); return; }
-    e.currentTarget.setPointerCapture(e.pointerId);
+    if (!isMiddleMarquee && isGrp) { setMenu(null); return; }
     setMenu(null);
     setDisconnectMenu(null);
     setLinkAddMenu(null);
@@ -1476,6 +3158,15 @@ export default function App() {
     setActiveStoryboard(null);
     setActiveOnlineVideo(null);
     setOnlinePopover(null);
+    if (isMiddleMarquee) {
+      const point = world(e.clientX, e.clientY);
+      marquee.current = point;
+      marqueeIncludesLinks.current = true;
+      setSelectionBox({ x: point.x, y: point.y, width: 0, height: 0 });
+      setSelected([]);
+      setSelectedLinks([]);
+      return;
+    }
     if (e.ctrlKey && e.altKey) {
       const point = world(e.clientX, e.clientY);
       lineMarquee.current = point;
@@ -1486,6 +3177,7 @@ export default function App() {
     if (e.ctrlKey) {
       const point = world(e.clientX, e.clientY);
       marquee.current = point;
+      marqueeIncludesLinks.current = false;
       setSelectionBox({ x: point.x, y: point.y, width: 0, height: 0 });
       setSelected([]);
       return;
@@ -1498,7 +3190,7 @@ export default function App() {
       origin: project.view,
     };
   };
-  const canvasMove = (e: PointerEvent<HTMLDivElement>) => {
+  const canvasMove = (e: PointerEvent<HTMLElement>) => {
     if (lineMarquee.current) {
       const point = world(e.clientX, e.clientY);
       const start = lineMarquee.current;
@@ -1548,22 +3240,25 @@ export default function App() {
       setDraftLink({ from: linking.current.from, x: p.x, y: p.y, side: linking.current.side });
     }
   };
-  const canvasUp = (e: PointerEvent<HTMLDivElement>) => {
+  const linksIntersectingSelectionBox = (box: { x: number; y: number; width: number; height: number }) => {
+    const intersects = (minX: number, minY: number, maxX: number, maxY: number) =>
+      minX < box.x + box.width && maxX > box.x && minY < box.y + box.height && maxY > box.y;
+    return project.links.filter((link) => {
+      const a = project.nodes.find((node) => node.id === link.from);
+      const b = project.nodes.find((node) => node.id === link.to);
+      if (!a || !b) return false;
+      const x1 = a.x + a.width, y1 = a.y + a.height / 2;
+      const x2 = b.x, y2 = b.y + b.height / 2;
+      const bend = Math.max(42, Math.abs(x2 - x1) * .38);
+      return intersects(Math.min(x1, x2, x1 + bend, x2 - bend), Math.min(y1, y2), Math.max(x1, x2, x1 + bend, x2 - bend), Math.max(y1, y2));
+    }).map((link) => link.id);
+  };
+  const canvasUp = (e: PointerEvent<HTMLElement>) => {
     if (e.currentTarget.hasPointerCapture(e.pointerId))
       e.currentTarget.releasePointerCapture(e.pointerId);
     if (lineMarquee.current && lineSelectionBox) {
       const box = lineSelectionBox;
-      const intersects = (minX: number, minY: number, maxX: number, maxY: number) =>
-        minX < box.x + box.width && maxX > box.x && minY < box.y + box.height && maxY > box.y;
-      setSelectedLinks(project.links.filter((link) => {
-        const a = project.nodes.find((node) => node.id === link.from);
-        const b = project.nodes.find((node) => node.id === link.to);
-        if (!a || !b) return false;
-        const x1 = a.x + a.width, y1 = a.y + a.height / 2;
-        const x2 = b.x, y2 = b.y + b.height / 2;
-        const bend = Math.max(42, Math.abs(x2 - x1) * .38);
-        return intersects(Math.min(x1, x2, x1 + bend, x2 - bend), Math.min(y1, y2), Math.max(x1, x2, x1 + bend, x2 - bend), Math.max(y1, y2));
-      }).map((link) => link.id));
+      setSelectedLinks(linksIntersectingSelectionBox(box));
       lineMarquee.current = null;
       setLineSelectionBox(null);
     }
@@ -1580,10 +3275,22 @@ export default function App() {
           )
           .map((node) => node.id),
       );
+      if (marqueeIncludesLinks.current) setSelectedLinks(linksIntersectingSelectionBox(box));
       marquee.current = null;
+      marqueeIncludesLinks.current = false;
       setSelectionBox(null);
     }
     const mediaMove = moving.current;
+    const moveDistance = mediaMove
+      ? Math.hypot(e.clientX - mediaMove.startX, e.clientY - mediaMove.startY)
+      : 0;
+    let movementRecorded = false;
+    let mediaAttached = false;
+    const rememberMovement = () => {
+      if (!mediaMove || movementRecorded || moveDistance < 1) return;
+      undoHistory.current = [...undoHistory.current.slice(-5), mediaMove.startProject];
+      movementRecorded = true;
+    };
     if (mediaMove?.sourceId) {
       const sourceId = mediaMove.sourceId;
       const point = world(e.clientX, e.clientY);
@@ -1597,23 +3304,27 @@ export default function App() {
       );
       if (textTarget) {
         const original = mediaMove.nodes[sourceId];
-        change((current) => ({
-          ...current,
-          nodes: current.nodes.map((node) =>
-            node.id === sourceId && original
-              ? { ...node, x: original.x, y: original.y }
-              : node,
-          ),
-          links: current.links.some(
-            (link) => link.from === sourceId && link.to === textTarget.id,
-          )
-            ? current.links
-            : [
-                ...current.links,
-                { id: newId(), from: sourceId, to: textTarget.id },
-              ],
-        }));
-        setMessage("素材已作为参考连接到文本节点");
+        const proposal = appendTypedLink(project, sourceId, textTarget.id);
+        if (proposal.issues.length) {
+          setMessage(`无法作为文本参考：${graphIssueText(proposal.issues)}`);
+        } else {
+          setProject((current) => {
+            const resetPosition = {
+              ...current,
+              nodes: current.nodes.map((node) =>
+                node.id === sourceId && original
+                  ? { ...node, x: original.x, y: original.y }
+                  : node,
+              ),
+            };
+            const next = appendTypedLink(resetPosition, sourceId, textTarget.id).project;
+            projectRef.current = next;
+            return next;
+          });
+          rememberMovement();
+          mediaAttached = true;
+          setMessage("图片已连接到文本节点的参考图片插槽");
+        }
       }
     }
     const activeLink = linking.current;
@@ -1627,11 +3338,23 @@ export default function App() {
       });
     }
     if (mediaMove?.isGroupDrag) {
-  const dx2 = (e.clientX - mediaMove.startX) / project.view.zoom;
-  const dy2 = (e.clientY - mediaMove.startY) / project.view.zoom;
-  change((p) => ({ ...p, groups: (p.groups || []).map((g) => g.id === mediaMove?.isGroupDrag ? { ...g, bounds: { x: g.bounds.x + dx2, y: g.bounds.y + dy2, w: g.bounds.w, h: g.bounds.h } } : g) }));
-}
-setPanning(false);
+      const dx2 = (e.clientX - mediaMove.startX) / project.view.zoom;
+      const dy2 = (e.clientY - mediaMove.startY) / project.view.zoom;
+      setProject((current) => {
+        const next = {
+          ...current,
+          groups: (current.groups || []).map((group) => group.id === mediaMove.isGroupDrag && mediaMove.startBounds
+            ? { ...group, bounds: { ...mediaMove.startBounds, x: mediaMove.startBounds.x + dx2, y: mediaMove.startBounds.y + dy2 } }
+            : group),
+        };
+        projectRef.current = next;
+        return next;
+      });
+      rememberMovement();
+    } else if (mediaMove && !mediaAttached) {
+      rememberMovement();
+    }
+    setPanning(false);
     drag.current = null;
     moving.current = null;
     linking.current = null;
@@ -1640,6 +3363,9 @@ setPanning(false);
   const nodeDown = (e: PointerEvent, n: NodeItem) => {
     if (e.button !== 0) return;
     e.stopPropagation();
+    // Keep receiving movement when the pointer starts on an image or video frame.
+    // This makes click-and-hold dragging work across the entire picture, not only its title.
+    e.currentTarget.setPointerCapture?.(e.pointerId);
     setSelectedLinks([]);
     const next = e.ctrlKey
       ? selected.includes(n.id)
@@ -1649,12 +3375,21 @@ setPanning(false);
         ? selected
         : [n.id];
     setSelected(next);
+    if (n.locked) return;
     let grpBounds: any = undefined;
     const ng = (project.groups || []).find((g) => g.nodeIds.includes(n.id));
     if (ng) { const b = ng.bounds || (() => { const gns = project.nodes.filter((x) => ng.nodeIds.includes(x.id)); const xs2 = gns.map((x) => x.x), ys2 = gns.map((x) => x.y), xe2 = gns.map((x) => x.x + x.width), ye2 = gns.map((x) => x.y + x.height); return { x: Math.min(...xs2) - 12, y: Math.min(...ys2) - 12, w: Math.max(...xe2) - Math.min(...xs2) + 24, h: Math.max(...ye2) - Math.min(...ys2) + 24 }; })(); grpBounds = { minX: b.x, minY: b.y, maxX: b.x + b.w, maxY: b.y + b.h }; }
+    // A text annotation owns its pointer, so moving the text keeps its visual
+    // relationship to the arrow.  The arrow itself remains independently movable.
+    const movingIds = new Set(next);
+    project.nodes.forEach((node) => {
+      if (node.kind === "annotation" && next.includes(node.id) && node.pointerId) {
+        movingIds.add(node.pointerId);
+      }
+    });
     const movingNodes = Object.fromEntries(
       project.nodes
-        .filter((x) => next.includes(x.id))
+        .filter((x) => movingIds.has(x.id))
         .map((x) => [x.id, { x: x.x, y: x.y }]),
     );
     moving.current = {
@@ -1663,6 +3398,7 @@ setPanning(false);
       nodes: movingNodes,
       sourceId: n.kind === "image" || n.kind === "video" ? n.id : undefined,
       groupBounds: grpBounds,
+      startProject: project,
     };
   };
   const nodeMenu = (e: React.MouseEvent, id: string) => {
@@ -1687,14 +3423,21 @@ setPanning(false);
       node: undefined,
     });
   };
+  const deleteCanvasNodes = (ids: string[]) => {
+    if (!ids.length) return;
+    const projectId = activeProjectIdRef.current;
+    ids.forEach((id) => {
+      const activeRun = runRegistry.current.getSnapshot(projectId, id);
+      if (activeRun?.status === "running") {
+        // Deleting is a local ownership boundary. The provider may finish its
+        // task, but its delayed result cannot create an orphan node here.
+        runRegistry.current.cancel(projectId, id, activeRun.runId);
+      }
+    });
+    change((p) => deleteNodes(p, ids));
+  };
   const deleteSelected = () => {
-    change((p) => ({
-      ...p,
-      nodes: p.nodes.filter((n) => !selected.includes(n.id)),
-      links: p.links.filter(
-        (l) => !selected.includes(l.from) && !selected.includes(l.to),
-      ),
-    }));
+    deleteCanvasNodes(selected);
     setSelected([]);
   };
   const copy = () => {
@@ -1717,30 +3460,82 @@ setPanning(false);
     setSelected(copies.map((n) => n.id));
   };
   const resetView = () =>
-    change((p) => ({ ...p, view: { x: 190, y: 130, zoom: 1 } }));
+    change((p) => ({ ...p, view: { x: 120, y: 92, zoom: 0.86 } }));
   const newProject = () => {
-    if (!window.confirm("将开始一个新的空白项目。当前画布会被替换，建议先导出项目。是否继续？")) return;
-    change(() => ({ nodes: [], links: [], view: { x: 190, y: 130, zoom: 1 } }));
-    setSelected([]);
-    setRecent([]);
-    setActiveText(null);
-    setActiveStoryboard(null);
-    setMediaLibraryOpen(false);
-    setDirectorOpen(false);
-    setHistoryId(newId());
+    if (!window.confirm("将开始一个新的默认项目。当前画布会被替换，建议先导出项目。是否继续？")) return;
+    if (!flushActiveProjectSave()) {
+      setMessage("当前项目未能离线保存，已取消新建。请先导出当前项目或清理本机存储空间。");
+      return;
+    }
+    const id = newId();
+    const nextProject = starter();
+    if (!persistProjectSnapshot(nextProject, id, "未命名项目")) {
+      setMessage("新项目无法写入本机存储，已保持当前项目不变。请先导出或清理本机存储空间后重试。");
+      return;
+    }
+    undoHistory.current = [];
+    activateProjectIdentity(id, "未命名项目", nextProject);
+    setHistoryId(id);
+    setProject(nextProject);
+    setProjectName("未命名项目");
+    resetProjectSession();
     setMessage("已新建项目");
   };
   const exportProject = async () => {
-    const canvasProject = safeProject(project);
+    // Export must include the very last drag/resize frame even if it has not
+    // reached React state yet. The same snapshot is used for every companion
+    // key, so a saved JSON never combines one project's canvas with another
+    // project's director data.
+    const canvasProject = safeProject(flushPendingFrameChange());
+    const exportProjectId = historyIdRef.current;
+    const exportProjectName = projectNameRef.current.trim() || "未命名项目";
+    // The library is app-wide for backward compatibility, but a project export
+    // should only carry the workflows this canvas actually names. Otherwise
+    // importing Project A can silently replace unrelated Project B workflows.
+    const workflowIds = referencedComfyWorkflowIds(canvasProject);
+    const projectWorkflows = readComfyWorkflowLibrary()
+      .filter((workflow) => workflowIds.has(workflow.id));
     const readStoredJson = (key: string, fallback: unknown) => {
       try { return JSON.parse(localStorage.getItem(key) || "") as unknown; } catch { return fallback; }
     };
-    const content = JSON.stringify({
+    // Keep this package self-describing.  The manifest is a report only: it
+    // never pretends that a path or a browser Blob is a portable media file.
+    const rawProjectPackage = {
       ...canvasProject,
-      __ymProjectPackage: 1,
-      director: readStoredJson(`ym-director-editor-v3:${historyId}`, null),
-      directorAssets: readStoredJson(`ym-director-assets-v1:${historyId}`, []),
+      __ymProjectPackage: 2,
+      projectName: exportProjectName,
+      comfyWorkflows: projectWorkflows,
+      promptLibrary: readStoredJson("yimu-prompt-library", []),
+      director: readStoredJson(`ym-director-editor-v3:${exportProjectId}`, null),
+      directorAssets: readStoredJson(`ym-director-assets-v1:${exportProjectId}`, []),
+    };
+    const { value: projectPackage, redactedPaths } = redactProjectSecrets(rawProjectPackage);
+    const portability = analyzeProjectPortability(projectPackage);
+    const portabilityWarnings = portability.items
+      .filter((item) => item.status !== "portable")
+      .map((item) => `${item.label}：${item.message}`);
+    const manifest = createProjectPortabilityManifest(projectPackage);
+    // Source URLs are already present in the project itself. Keeping them a
+    // second time in the display-only manifest can double a large Data URL
+    // export (and quickly makes video projects impossible to share).
+    const compactManifest = {
+      ...manifest,
+      report: {
+        ...manifest.report,
+        items: manifest.report.items.map(({ source: _source, ...item }) => item),
+      },
+    };
+    const content = JSON.stringify({
+      ...projectPackage,
+      portabilityWarnings,
+      portabilityManifest: compactManifest,
     }, null, 2);
+    const portabilitySuffix = portability.summary.fullyPortable
+      ? "项目可在另一台电脑直接恢复"
+      : `${portability.summary.requiresRebind} 项需重新绑定、${portability.summary.missing} 项缺失`;
+    const credentialSuffix = redactedPaths.length
+      ? `；已移除 ${redactedPaths.length} 个密钥/Token 字段`
+      : "";
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
       const { invoke } = await import("@tauri-apps/api/core");
@@ -1756,7 +3551,7 @@ setPanning(false);
       });
       if (!path) return;
       await invoke("save_project", { path, content });
-      setMessage("项目已保存到本机");
+      setMessage(`项目已保存到本机；${portabilitySuffix}${credentialSuffix}`);
     } catch {
       const blob = new Blob([content], { type: "application/json" });
       const a = document.createElement("a");
@@ -1764,7 +3559,7 @@ setPanning(false);
       a.download = `离线画布项目-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(a.href);
-      setMessage("项目文件已导出");
+      setMessage(`项目文件已导出；${portabilitySuffix}${credentialSuffix}`);
     }
   };
   const chooseDefaultSaveDir = async () => {
@@ -1776,16 +3571,55 @@ setPanning(false);
       setMessage("当前环境无法选择目录");
     }
   };
+  const closeApplication = async () => {
+    if (!flushActiveProjectSave()) {
+      setMessage("当前项目尚未保存，已取消关闭。请先导出项目或清理本机存储空间后再试。");
+      return;
+    }
+    try {
+      await getCurrentWindow().close();
+    } catch (error) {
+      setMessage(`关闭失败：${String(error)}`);
+    }
+  };
   const openHistoryProject = (item: HistoryProject) => {
-    setProject(item.project);
+    if (item.id === historyIdRef.current) return;
+    if (!flushActiveProjectSave()) {
+      setMessage("当前项目未能离线保存，已取消切换。请先导出当前项目或清理本机存储空间。");
+      return;
+    }
+    const nextProject = safeProject(item.project);
+    if (!persistProjectSnapshot(nextProject, item.id, item.name)) {
+      setMessage("目标项目无法写入本机存储，已取消切换。请先导出当前项目或清理本机存储空间。");
+      return;
+    }
+    undoHistory.current = [];
+    activateProjectIdentity(item.id, item.name, nextProject);
+    setProject(nextProject);
     setHistoryId(item.id);
-    setSelected([]);
-    setRecent([]);
+    setProjectName(item.name);
+    resetProjectSession();
     setPreferences(false);
     setMessage("历史项目已打开");
   };
   const deleteHistoryProject = (id: string) => {
-    setHistoryProjects((items) => items.filter((item) => item.id !== id));
+    if (id === historyId) {
+      setMessage("当前正在编辑的项目不能删除，请先打开其他项目");
+      return;
+    }
+    const nextHistory = historyProjectsRef.current.filter((item) => item.id !== id);
+    try {
+      // Keep the index authoritative before removing the document. If storage
+      // is full or unavailable, leave both the visible history and its file
+      // untouched instead of creating a dangling index entry.
+      saveProjectIndex(localStorage, nextHistory);
+      removeProjectDocument(localStorage, id);
+      historyProjectsRef.current = nextHistory;
+      setHistoryProjects(nextHistory);
+      setMessage("历史项目已删除");
+    } catch {
+      setMessage("历史项目删除失败，请导出项目后检查本机存储空间");
+    }
   };
   const downloadMedia = async (node: NodeItem) => {
     if (!node.src && !node.localPath) return;
@@ -1822,36 +3656,17 @@ setPanning(false);
   const importProject = (e: ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    const r = new FileReader();
-    r.onload = () => {
-      try {
-        const p = JSON.parse(String(r.result));
-        if (!Array.isArray(p.nodes)) throw Error();
-        const nextProjectId = newId();
-        if (p.__ymProjectPackage === 1) {
-          if (p.director && typeof p.director === "object") {
-            localStorage.setItem(`ym-director-editor-v3:${nextProjectId}`, JSON.stringify(p.director));
-          }
-          if (Array.isArray(p.directorAssets)) {
-            localStorage.setItem(`ym-director-assets-v1:${nextProjectId}`, JSON.stringify(p.directorAssets));
-          }
-        }
-        setProject({
-          nodes: p.nodes,
-          links: p.links || [],
-          view: p.view || { x: 190, y: 130, zoom: 1 },
-        });
-        setHistoryId(nextProjectId);
-        setSelected([]);
-        setMessage(p.__ymProjectPackage === 1 ? "完整项目已打开，导演台时间线与素材已恢复" : "旧版项目已打开（缺失的本地媒体需重新放入）");
-      } catch {
-        setMessage("项目文件格式不正确");
-      }
-    };
-    r.readAsText(f);
+    readProjectJsonFile(f, (data) => {
+      // The package path performs schema migration, portability inspection,
+      // secret redaction and a synchronous save of the current project before
+      // replacing the canvas. It also identifies a pasted ComfyUI workflow
+      // instead of opening it as a malformed project.
+      openProjectPackage(data, f.name);
+    });
     e.target.value = "";
   };
   const autoConnect = async (silent = false) => {
+    const sequence = ++autoConnectSequence.current;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const result = await invoke<{
@@ -1859,6 +3674,8 @@ setPanning(false);
         endpoint: string;
         detail: string;
       }>("find_comfyui");
+      // A slow earlier probe must not overwrite a later manual reconnect.
+      if (sequence !== autoConnectSequence.current) return;
       if (result.connected) {
         setApiUrl(result.endpoint);
         setComfyConnected(true);
@@ -1868,32 +3685,46 @@ setPanning(false);
         if (!silent) setMessage(result.detail);
       }
     } catch {
+      if (sequence !== autoConnectSequence.current) return;
       setComfyConnected(false);
       if (!silent) setMessage("自动连接组件没有启动，请使用新版桌面程序");
     }
   };
   useEffect(() => {
-    if (!comfyConnected) return;
-    const timer = window.setInterval(() => autoConnect(true), 8000);
-    return () => window.clearInterval(timer);
-  }, [comfyConnected]);
-  const prepareLinkedWorkflow = async (apiId: string, rawWorkflow: unknown) => {
+    void autoConnect(true);
+    const timer = window.setInterval(() => void autoConnect(true), 8000);
+    return () => {
+      window.clearInterval(timer);
+      autoConnectSequence.current += 1;
+    };
+  }, []);
+  const prepareLinkedWorkflow = async (
+    apiId: string,
+    rawWorkflow: unknown,
+    promptOverride = "",
+    projectSnapshot: Project = projectRef.current,
+    // Imported Comfy API JSON may use custom nodes whose /object_info contract
+    // is incomplete.  Those workflows already run in ComfyUI, so let ComfyUI
+    // be the final validator instead of rejecting them because the canvas has
+    // no typed sockets for every private/custom input.
+    deferValidationToComfy = false,
+  ) => {
     const { invoke } = await import("@tauri-apps/api/core");
     const seen = new Set<string>();
     const sources: NodeItem[] = [];
     const visit = (target: string) =>
-      project.links
+      projectSnapshot.links
         .filter((link) => link.to === target)
         .forEach((link) => {
           if (seen.has(link.from)) return;
           seen.add(link.from);
-          const source = project.nodes.find((node) => node.id === link.from);
+          const source = projectSnapshot.nodes.find((node) => node.id === link.from);
           if (!source) return;
           sources.push(source);
           visit(source.id);
         });
     visit(apiId);
-    const text = sources
+    const linkedText = sources
       .filter(
         (source) => source.kind === "text" || source.kind === "storyboard",
       )
@@ -1904,6 +3735,7 @@ setPanning(false);
       )
       .filter(Boolean)
       .join("\n\n");
+    const text = [promptOverride.trim(), linkedText].filter(Boolean).join("\n\n");
     const media = sources
       .filter(
         (source) =>
@@ -1937,94 +3769,68 @@ setPanning(false);
       string,
       { class_type?: string; inputs?: Record<string, unknown> }
     >;
-    const graph = workflow;
-    const isLiteral = (value: unknown) =>
-      typeof value === "string" ||
-      typeof value === "number" ||
-      typeof value === "boolean";
-    if (text) {
-      let changed = false;
-      Object.values(graph).forEach((node) => {
-        if (!node.inputs) return;
-        Object.entries(node.inputs).forEach(([key, value]) => {
-          const lower = key.toLowerCase();
-          if (
-            isLiteral(value) &&
-            [
-              "text",
-              "prompt",
-              "value",
-              "string",
-              "positive",
-              "positive_prompt",
-            ].includes(lower)
-          ) {
-            node.inputs![key] = text;
-            changed = true;
-          }
-        });
-      });
-      if (!changed)
-        setMessage("已连接文字，但工作流没有可自动替换的提示词字段");
-    }
     const byKind = (kind: Kind) =>
       uploaded.filter((item) => item.kind === kind).map((item) => item.name);
-    let imageIndex = 0,
-      videoIndex = 0,
-      audioIndex = 0;
-    Object.values(graph).forEach((node) => {
-      if (!node.inputs) return;
-      Object.entries(node.inputs).forEach(([key, value]) => {
-        if (!isLiteral(value)) return;
-        const lower = key.toLowerCase();
-        const loadImage =
-          /loadimage|image/.test(node.class_type || "") &&
-          ["image", "input", "path", "file"].includes(lower);
-        if (
-          (loadImage ||
-            [
-              "image",
-              "reference_image",
-              "reference_image_1",
-              "reference_image_2",
-              "reference_image_3",
-            ].includes(lower)) &&
-          byKind("image")[imageIndex]
-        )
-          node.inputs![key] =
-            byKind("image")[imageIndex++ % byKind("image").length];
-        if (
-          ["video", "video_path", "input_video"].includes(lower) &&
-          byKind("video")[videoIndex]
-        )
-          node.inputs![key] =
-            byKind("video")[videoIndex++ % byKind("video").length];
-        if (
-          ["audio", "audio_path", "input_audio"].includes(lower) &&
-          byKind("audio")[audioIndex]
-        )
-          node.inputs![key] =
-            byKind("audio")[audioIndex++ % byKind("audio").length];
-      });
-    });
+    // Always read the live schema. A workflow can be edited or a custom node
+    // updated after it was imported, so old node ids/types must never be trusted.
+    const objectInfo = await invoke<Record<string, any>>("get_comfy_object_info", { endpoint: apiUrl });
+    if (!objectInfo || typeof objectInfo !== "object" || Array.isArray(objectInfo) || !Object.keys(objectInfo).length) {
+      throw new ComfyWorkflowValidationError([{
+        level: "error",
+        code: "object-info-required",
+        message: "ComfyUI 返回的 /object_info 为空，无法验证当前工作流的 STRING/TEXT、图片、视频和音频插槽；已阻止提交以避免提示词或素材被静默丢弃。",
+      }]);
+    }
+    const bound = bindCanvasInputsToComfyWorkflow(workflow, {
+      text,
+      image: byKind("image"),
+      video: byKind("video"),
+      audio: byKind("audio"),
+    }, objectInfo);
+    const preparedOutput = prepareComfyVisualOutput(bound.graph, objectInfo);
+    const structural = validateComfyWorkflow(preparedOutput.graph, objectInfo);
+    const rawDiagnostics = [...bound.diagnostics, ...preparedOutput.diagnostics, ...structural.diagnostics];
+    // Custom video savers can run normally in ComfyUI while omitting part of
+    // their media contract from /object_info.  Only proven broken API links
+    // block submission; ComfyUI remains the final validator for custom nodes.
+    const blockingCodes = new Set(["source-node-missing", "source-output-missing", "slot-type-mismatch"]);
+    const diagnostics = rawDiagnostics.map((diagnostic) => diagnostic.level === "error" && (deferValidationToComfy || !blockingCodes.has(diagnostic.code || ""))
+      ? { ...diagnostic, level: "warning" as const, message: `${diagnostic.message}（兼容模式：该自定义节点的接口信息不完整，已交由 ComfyUI 按原工作流验证。）` }
+      : diagnostic);
+    const errors = diagnostics.filter((diagnostic) => diagnostic.level === "error");
+    if (errors.length) throw new ComfyWorkflowValidationError(diagnostics);
     return {
-      workflow,
+      workflow: preparedOutput.graph,
       summary:
         `${text ? "文字" : ""}${uploaded.length ? `${text ? " + " : ""}${uploaded.map((item) => typeLabel[item.kind]).join("、")}` : ""}` ||
         "工作流原始参数",
+      diagnostics,
+      interface: structural.interface,
+      outputTargets: preparedOutput.outputTargets,
     };
   };
   const stopRun = async (id: string) => {
-    // ComfyUI 的 /interrupt 是全局中断接口。重复点击会连续发送全局中断，
-    // 让同一任务一直处于“正在运行 / 正在中断”的死循环。
-    if (cancelledRuns.current.has(id)) {
+    const runProjectId = activeProjectIdRef.current;
+    const activeRun = runRegistry.current.getSnapshot(runProjectId, id);
+    // ComfyUI's /interrupt is global. More importantly, cancellation is bound
+    // to one runId: a delayed stop from an old run must never stop a fast
+    // retry on the same node.
+    if (activeRun?.status === "cancelled") {
       setMessage("停止请求已发送，正在等待 ComfyUI 结束当前任务…");
       return;
     }
-    cancelledRuns.current.add(id);
+    if (!activeRun || activeRun.status !== "running") {
+      setMessage("当前节点没有可停止的运行任务。");
+      return;
+    }
+    if (!runRegistry.current.cancel(runProjectId, id, activeRun.runId)) return;
     const item = project.nodes.find((node) => node.id === id);
-    change((p) => ({ ...p, nodes: p.nodes.map((node) => node.id === id ? { ...node, status: "stopping" } : node) }));
-    if (item?.workflow && !item.onlineProvider) {
+    setRuntimeNodeStatus(id, "stopping");
+    const source = (item?.workflow && typeof item.workflow === "object"
+      ? (item.workflow as { source?: GenerationSource }).source
+      : undefined);
+    const usesLocalComfy = (item?.kind === "api" && !item.onlineProvider) || source === "comfy";
+    if (usesLocalComfy) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("interrupt_comfyui", { endpoint: apiUrl });
@@ -2032,20 +3838,50 @@ setPanning(false);
         addLog(`停止 ComfyUI：${String(error).replace(/^Error: /, "")}`);
       }
     }
-    setMessage("已向 ComfyUI 发送一次停止请求，正在等待任务退出…");
+    setMessage(usesLocalComfy
+      ? "已向 ComfyUI 发送一次停止请求，正在等待任务退出…"
+      : "已取消本次画布回流；远程服务若已开始执行，可能仍会在平台侧完成，但结果不会写回画布。",
+    );
     window.setTimeout(() => {
-      if (!cancelledRuns.current.has(id)) return;
-      cancelledRuns.current.delete(id);
-      change((p) => ({ ...p, nodes: p.nodes.map((node) => node.id === id && node.status === "stopping" ? { ...node, status: "idle" } : node) }));
-      setMessage("停止请求已完成；如 ComfyUI 仍显示任务，请在 ComfyUI 中仅点击一次红色 X。 ");
+      const snapshot = runRegistry.current.getSnapshot(runProjectId, id);
+      if (activeProjectIdRef.current !== runProjectId || snapshot?.runId !== activeRun.runId || snapshot.status !== "cancelled") return;
+      // The token remains cancelled forever. This is only a visual reset after
+      // the requested cancellation grace period, never a permission to commit
+      // a late result from the remote task.
+      setRuntimeNodeStatus(id, "idle");
+      setMessage(usesLocalComfy
+        ? "停止请求已完成；如 ComfyUI 仍显示任务，请在 ComfyUI 中仅点击一次红色 X。"
+        : "本次生成已停止接收结果；可在对应平台控制台查看或取消远程任务。",
+      );
     }, 5000);
   };
-  const run = async (id: string, replaceTargetId?: string, workflowOverride?: unknown) => {
-    cancelledRuns.current.delete(id);
-    const item = project.nodes.find((n) => n.id === id);
+  const run = async (
+    id: string,
+    replaceTargetId?: string,
+    workflowOverride?: unknown,
+    promptOverride = "",
+    inputProjectOverride?: Project,
+  ) => {
+    const runProjectId = activeProjectIdRef.current;
+    // Capture the inputs at the moment the user presses Run.  The matching
+    // input signature below prevents late results from replacing a newer edit;
+    // this snapshot also keeps Comfy binding and OpenAI prompt collection in
+    // sync with that signature instead of reading a later React closure.
+    const inputProject = inputProjectOverride || projectRef.current;
+    const runIsCurrent = (token: RunToken, inputSignature: string) =>
+      canCommitRunWithInputs(token, inputSignature);
+    const item = inputProject.nodes.find((n) => n.id === id);
     if (!item) {
       setMessage("运行失败：画布中没有找到目标节点");
       return;
+    }
+    // A direct Comfy API workflow is self-contained: “0 个画布输入” does
+    // not mean it cannot run.  Its custom node interface is validated by the
+    // connected ComfyUI instance, not by the generic canvas socket catalogue.
+    const isImportedLocalComfyApi = item.kind === "api" && !item.onlineProvider;
+    if (!isImportedLocalComfyApi && !validateExecutionGraph(id, "工作流", inputProject)) return;
+    if (isImportedLocalComfyApi) {
+      addLog("导入的 Comfy API 工作流：跳过画布通用插槽拦截，交由 ComfyUI 按原工作流校验。");
     }
     // 旧版画布会把任意“在线平台”都按 OpenAI 图片接口提交，这会导致
     // 视频平台收到错误请求。只有明确的 OpenAI 兼容节点才允许走该分支。
@@ -2071,10 +3907,10 @@ setPanning(false);
       }
       const seen = new Set<string>();
       const text: string[] = [];
-      const visit = (target: string) => project.links.filter((link) => link.to === target).forEach((link) => {
+      const visit = (target: string) => inputProject.links.filter((link) => link.to === target).forEach((link) => {
         if (seen.has(link.from)) return;
         seen.add(link.from);
-        const source = project.nodes.find((node) => node.id === link.from);
+        const source = inputProject.nodes.find((node) => node.id === link.from);
         if (!source) return;
         if (source.kind === "text") text.push(source.text || "");
         if (source.kind === "storyboard") text.push(storyboardText(source.storyboard));
@@ -2083,20 +3919,26 @@ setPanning(false);
       visit(id);
       const prompt = text.filter(Boolean).join("\n\n");
       if (!prompt) { setMessage("请先连接一个文本/提示词节点到 OpenAI API"); return; }
-      change((p) => ({ ...p, nodes: p.nodes.map((n) => n.id === id ? { ...n, status: "running" } : n) }));
+      const runToken = runRegistry.current.start(runProjectId, id);
+      const runInputSignature = createExecutionInputSignature(inputProject, id);
+      setRuntimeNodeStatus(id, "running");
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         setMessage("OpenAI 正在生成图片…");
         const src = await invoke<string>("generate_openai_image", { endpoint: previous.endpoint, apiKey: previous.apiKey, prompt, model: previous.model });
-        if (cancelledRuns.current.has(id)) return;
-        const targets = project.links.filter((link) => link.from === id).map((link) => link.to);
-        const outputId = replaceTargetId || targets.map((target) => project.nodes.find((node) => node.id === target)).find((node) => node?.kind === "image")?.id;
+        if (!runIsCurrent(runToken, runInputSignature)) return;
+        const targets = inputProject.links.filter((link) => link.from === id).map((link) => link.to);
+        const outputId = replaceTargetId || targets.map((target) => inputProject.nodes.find((node) => node.id === target)).find((node) => node?.kind === "image")?.id;
         change((p) => ({ ...p, nodes: p.nodes.map((n) => n.id === id ? { ...n, status: "done" } : n.id === outputId ? { ...n, src, name: `OpenAI-${previous.model}.png`, fileName: `OpenAI-${previous.model}.png` } : n) }));
+        runRegistry.current.finish(runToken.projectId, runToken.nodeId, runToken.runId);
         setMessage("OpenAI 图片已生成并传入连接的图片节点");
       } catch (error) {
         addLog(`OpenAI：${String(error).replace(/^Error: /, "")}`);
-        change((p) => ({ ...p, nodes: p.nodes.map((n) => n.id === id ? { ...n, status: "error" } : n) }));
-        setMessage(`OpenAI 生成失败：${String(error).replace(/^Error: /, "")}`);
+        if (runIsCurrent(runToken, runInputSignature)) {
+          setRuntimeNodeStatus(id, "error");
+          runRegistry.current.finish(runToken.projectId, runToken.nodeId, runToken.runId);
+          setMessage(`OpenAI 生成失败：${humanizeApiError(error)}`);
+        }
       }
       return;
     }
@@ -2108,47 +3950,107 @@ setPanning(false);
       setMessage("请通过“导入 API”把 ComfyUI 的 API JSON 放入画布");
       return;
     }
-    change((p) => ({
-      ...p,
-      nodes: p.nodes.map((n) =>
-        n.id === id ? { ...n, status: "running" } : n,
-      ),
-    }));
+    const runToken = runRegistry.current.start(runProjectId, id);
+    const runInputSignature = createExecutionInputSignature(inputProject, id);
+    setRuntimeNodeStatus(id, "running");
     try {
-      const { invoke, convertFileSrc } = await import("@tauri-apps/api/core");
-      const prepared = await prepareLinkedWorkflow(id, runnableWorkflow);
-      setMessage(`正在把已连接的 ${prepared.summary} 传入 ComfyUI…`);
+      const { invoke } = await import("@tauri-apps/api/core");
+      let prepared;
+      try {
+        prepared = await prepareLinkedWorkflow(
+          id,
+          runnableWorkflow,
+          promptOverride,
+          inputProject,
+          isImportedLocalComfyApi,
+        );
+        if (!runIsCurrent(runToken, runInputSignature)) return;
+      } catch (error) {
+        if (!(error instanceof ComfyWorkflowValidationError)) throw error;
+        const errors = error.diagnostics.filter((diagnostic) => diagnostic.level === "error");
+        if (runIsCurrent(runToken, runInputSignature)) {
+          setComfyDiagnostics((current) => ({ ...current, [id]: error.diagnostics }));
+          setExpandedComfyDiagnostics(id);
+          change((p) => ({
+            ...p,
+            nodes: p.nodes.map((n) => n.id === id ? {
+              ...n,
+              status: "error",
+              validationErrors: [
+                ...withoutComfyValidationErrors(n.validationErrors),
+                ...errors.map(comfyDiagnosticSummary),
+              ],
+            } : n),
+          }));
+          setMessage(`工作流校验未通过：${comfyDiagnosticTitle(errors[0] || error.diagnostics[0])}`);
+          errors.forEach((diagnostic) => addLog(`ComfyUI 连线校验：${comfyDiagnosticSummary(diagnostic)}`));
+          runRegistry.current.finish(runToken.projectId, runToken.nodeId, runToken.runId);
+        }
+        return;
+      }
+      // Warnings and successful media binding are still useful after the task
+      // starts.  Keep them on this canvas session, but clear stale preflight
+      // errors only after the current live schema has passed validation.
+      setComfyDiagnostics((current) => ({ ...current, [id]: prepared.diagnostics }));
+      change((p) => ({
+        ...p,
+        nodes: p.nodes.map((node) => node.id === id
+          ? { ...node, validationErrors: withoutComfyValidationErrors(node.validationErrors) }
+          : node),
+      }));
+      const mappingNotes = prepared.diagnostics
+        .filter((diagnostic) => diagnostic.level !== "warning")
+        .map((diagnostic) => diagnostic.message);
+      mappingNotes.forEach((note) => addLog(`ComfyUI 自动适配：${note}`));
+      setMessage(`正在把已连接的 ${prepared.summary} 传入 ComfyUI…${mappingNotes.length ? " 已完成节点适配。" : ""}`);
       const queued = await invoke<{ prompt_id?: string }>("queue_comfyui", {
         endpoint: apiUrl,
         workflow: prepared.workflow,
+        // Ask ComfyUI to execute the media-producing output nodes verified
+        // from the live schema.  Without this, a workflow containing both a
+        // text PreviewAny node and VHS_VideoCombine can complete only the text
+        // preview, leaving /history without the MP4 that the canvas expects.
+        outputTargets: prepared.outputTargets,
       });
+      if (!runIsCurrent(runToken, runInputSignature)) return;
       const promptId = queued.prompt_id;
       if (!promptId) throw Error("ComfyUI 没有返回任务编号");
       setMessage("ComfyUI 正在生成，画布会在任务完成后自动接收结果；再次点击节点中央按钮可停止任务");
-      type OutputFile = {
-        filename: string;
-        subfolder?: string;
-        type?: string;
-        fullpath?: string;
-      };
       type HistoryItem = {
         status?: { status_str?: string };
-        outputs?: Record<
-          string,
-          { images?: OutputFile[]; gifs?: OutputFile[]; videos?: OutputFile[]; audio?: OutputFile[] }
-        >;
+        outputs?: ComfyHistoryOutputs;
       };
       let history: Record<string, HistoryItem> | undefined;
-      // 视频和大图工作流常常超过 3 分钟；保持轮询 15 分钟，避免 ComfyUI
-      // 仍在运行时画布先把任务误判为超时。
-      for (let count = 0; count < 900; count++) {
-        if (cancelledRuns.current.has(id)) return;
+      let historyFailures = 0;
+      let lastHistoryFailure = "";
+      // LTX 等本地视频工作流在高分辨率、多参考图、音频和放大链路同时启用时，
+      // 实测可能略超过 15 分钟。画布必须比 ComfyUI 的真实任务耐心：只要
+      // 连接仍可读，就保持最多一小时的轮询，用户仍可随时按“停止”主动中断。
+      // 这避免成片前数秒被前端错误判定为超时、而 MP4 留在 ComfyUI 输出目录。
+      for (let count = 0; count < 3600; count++) {
+        if (!runIsCurrent(runToken, runInputSignature)) return;
         await new Promise((resolve) => setTimeout(resolve, 1000));
-        if (cancelledRuns.current.has(id)) return;
-        history = await invoke("get_comfy_history", {
-          endpoint: apiUrl,
-          promptId,
-        });
+        if (!runIsCurrent(runToken, runInputSignature)) return;
+        try {
+          history = await invoke("get_comfy_history", {
+            endpoint: apiUrl,
+            promptId,
+          });
+          historyFailures = 0;
+        } catch (error) {
+          historyFailures += 1;
+          lastHistoryFailure = humanizeApiError(error);
+          // ComfyUI may briefly refuse /history while its queue is switching
+          // or a large video is being encoded.  Do not mark a healthy remote
+          // task failed because of one transient polling error.
+          if (historyFailures >= 5) {
+            throw Error(`连续 ${historyFailures} 次无法读取 ComfyUI 任务状态：${lastHistoryFailure}`);
+          }
+          if (historyFailures === 1 || historyFailures === 3) {
+            addLog(`ComfyUI 任务状态暂时不可读（第 ${historyFailures}/5 次），将自动重试：${lastHistoryFailure}`);
+          }
+          continue;
+        }
         if (history?.[promptId]) break;
       }
       const result = history?.[promptId];
@@ -2158,54 +4060,134 @@ setPanning(false);
       const outputs = result.outputs;
       if (!outputs) throw Error("ComfyUI 未返回生成文件");
       const generated: NodeItem[] = [];
-      Object.values(outputs).forEach((output) =>
-        [...(output.images || []), ...(output.gifs || []), ...(output.videos || []), ...(output.audio || [])].forEach((file) => {
-          const lower = file.filename.toLowerCase();
-          const kind: Kind = /\.(mp4|webm|mov|avi)$/i.test(lower)
-            ? "video"
-            : /\.(mp3|wav|m4a|aac|flac)$/i.test(lower)
-              ? "audio"
-              : "image";
-          const src = file.fullpath
-            ? convertFileSrc(file.fullpath)
-            : `${apiUrl.replace(/\/$/, "")}/view?filename=${encodeURIComponent(file.filename)}&subfolder=${encodeURIComponent(file.subfolder || "")}&type=${encodeURIComponent(file.type || "output")}`;
-          const [width, height] = nodeSize[kind];
-          generated.push({
-            id: newId(),
-            kind,
-            x: item.x + item.width + 110,
-            y: item.y + generated.length * (height + 50),
-            width,
-            height,
-            name: file.filename,
-            src,
-            localPath: file.fullpath,
-            createdAt: Date.now(),
-          });
-        }),
+      // Prefer live-schema targets. If a custom saver omitted its media
+      // contract, compatibility mode may inspect only this task's history and
+      // only files explicitly marked `type: output`. Temporary PreviewImage or
+      // unsaved VHS files are never promoted into canvas assets.
+      const compatibilityCandidates = prepared.outputTargets.length ? [] : Object.keys(outputs);
+      const compatibilitySelection = selectComfyHistoryMedia(
+        outputs,
+        compatibilityCandidates,
+        { requireExplicitOutputType: true },
       );
+      const compatibilityOutputTargets = prepared.outputTargets.length
+        ? prepared.outputTargets
+        : [...new Set(compatibilitySelection.media.map((item) => item.outputNodeId))];
+      const usingCompatibilityOutputFallback = prepared.outputTargets.length === 0 && compatibilityOutputTargets.length > 0;
+      const selection = prepared.outputTargets.length
+        ? selectComfyHistoryMedia(outputs, compatibilityOutputTargets)
+        : compatibilitySelection;
+      const returnedMedia = selection.media;
+      const returnedTargetIds = new Set(returnedMedia.map((item) => item.outputNodeId));
+      const historyDiagnostics = prepared.outputTargets
+        .filter((nodeId) => !returnedTargetIds.has(nodeId))
+        .map((nodeId): ComfyWorkflowDiagnostic => ({
+          level: returnedMedia.length ? "warning" : "error",
+          code: "output-history-missing",
+          nodeId,
+          message: `已验证的输出节点 #${nodeId} 没有在本次 ComfyUI /history 中回传图片、视频或音频；画布不会改用其他节点的结果。`,
+        }));
+      const filteredIntermediate = selection.discarded.filter((media) => media.reason === "intermediate-file" || media.reason === "unverified-file");
+      const filteredCompanions = selection.discarded.filter((media) => media.reason === "video-companion" || media.reason === "duplicate-file");
+      const mediaFilterDiagnostics: ComfyWorkflowDiagnostic[] = [];
+      if (filteredIntermediate.length) mediaFilterDiagnostics.push({
+        level: "info",
+        code: "history-intermediate-media-ignored",
+        message: `已忽略 ${filteredIntermediate.length} 个临时 Preview/未验证 History 文件；它们不会作为最终素材回流画布。`,
+      });
+      if (filteredCompanions.length) mediaFilterDiagnostics.push({
+        level: "info",
+        code: "history-video-companion-ignored",
+        message: `已忽略 ${filteredCompanions.length} 个与最终视频重复的缩略图、伴生音频或重复文件。独立音频保存节点的结果仍会保留。`,
+      });
+      if (mediaFilterDiagnostics.length) {
+        mediaFilterDiagnostics.forEach((diagnostic) => addLog(`ComfyUI 输出筛选：${diagnostic.message}`));
+      }
+      const compatibilityDiagnostics: ComfyWorkflowDiagnostic[] = [];
+      if (usingCompatibilityOutputFallback) {
+        const compatibilityDiagnostic: ComfyWorkflowDiagnostic = {
+          level: "warning",
+          code: "history-output-compatibility-fallback",
+          message: "该自定义工作流未在 /object_info 声明媒体输出；已仅从本次任务 /history 中明确标记为 output 的持久文件回流，临时 Preview 不会回流。",
+        };
+        compatibilityDiagnostics.push(compatibilityDiagnostic);
+        addLog(`ComfyUI 兼容回流：${compatibilityDiagnostic.message}`);
+      }
+      if (historyDiagnostics.length || mediaFilterDiagnostics.length || compatibilityDiagnostics.length) {
+        setComfyDiagnostics((current) => ({
+          ...current,
+          [id]: [...prepared.diagnostics, ...compatibilityDiagnostics, ...historyDiagnostics, ...mediaFilterDiagnostics],
+        }));
+      }
+      for (const { file, kind } of returnedMedia) {
+        // A ComfyUI endpoint can be local or remote and its history payload is
+        // not a filesystem authorization token. Always read generated media
+        // through ComfyUI's /view contract instead of exposing `fullpath`
+        // through Tauri's asset protocol.
+        const liveSrc = `${apiUrl.replace(/\/$/, "")}/view?filename=${encodeURIComponent(file.filename)}&subfolder=${encodeURIComponent(file.subfolder || "")}&type=${encodeURIComponent(file.type || "output")}`;
+        let persistedMedia: ImportedWorkspaceMedia | null = null;
+        try {
+          persistedMedia = await cacheComfyGeneratedMedia(apiUrl, file, runProjectId);
+        } catch (cacheError) {
+          // The generation itself is successful and must still return to the
+          // canvas. Persisting is best effort here; leave a visible run log so
+          // a user understands why this individual card remains live-only.
+          addLog(`ComfyUI 结果未能保存到本机素材库，将暂时使用 ComfyUI 预览地址：${humanizeApiError(cacheError)}`);
+        }
+        // Prefer the managed copy. It survives a ComfyUI restart and is
+        // readable by the desktop asset protocol. VideoCanvas retries the
+        // live /view URL once if the just-written local asset is not ready.
+        const src = persistedMedia?.src || liveSrc;
+        const dimensions = kind === "image" || kind === "video"
+          ? await readGeneratedMediaDimensions(kind, src)
+          : null;
+        const cardSize = kind === "image" || kind === "video"
+          ? generatedMediaCardSize(kind, dimensions)
+          : { width: nodeSize[kind][0], height: nodeSize[kind][1] };
+        generated.push({
+          id: newId(),
+          kind,
+          x: item.x + item.width + 110,
+          y: item.y + generated.length * (cardSize.height + 50),
+          width: cardSize.width,
+          height: cardSize.height,
+          name: file.filename,
+          src,
+          ...(src !== liveSrc ? { fallbackSrc: liveSrc } : {}),
+          ...(persistedMedia?.localPath ? { localPath: persistedMedia.localPath } : {}),
+          ...(dimensions ? { mediaWidth: dimensions.width, mediaHeight: dimensions.height } : {}),
+          createdAt: Date.now(),
+        });
+      }
+      if (!generated.length) {
+        const expectedOutputs = prepared.outputTargets.length
+          ? `已验证的输出节点（${prepared.outputTargets.map((nodeId) => `#${nodeId}`).join("、")}）`
+          : "本次任务的输出节点";
+        throw Error(`ComfyUI 已执行，但${expectedOutputs}没有返回图片、视频或音频文件。请检查保存/预览节点是否启用，以及 ComfyUI 的 /history 是否记录该节点结果。`);
+      }
       const replacement = replaceTargetId
-        ? generated.find((node) => node.kind === project.nodes.find((node) => node.id === replaceTargetId)?.kind) || generated[0]
+        ? generated.find((node) => node.kind === inputProject.nodes.find((node) => node.id === replaceTargetId)?.kind) || generated[0]
         : undefined;
       const appended = replacement ? generated.filter((node) => node.id !== replacement.id) : generated;
+      if (!runIsCurrent(runToken, runInputSignature)) return;
       setRecent((items) => [...generated, ...items]);
       setRecentOpen(true);
-      change((p) => ({
-        ...p,
-        nodes: [
+      change((p) => {
+        let next: Project = {
+          ...p,
+          nodes: [
           ...p.nodes.map((node) =>
-            node.id === id ? { ...node, status: "done" }
+            node.id === id ? { ...node, status: "done", validationErrors: withoutComfyValidationErrors(node.validationErrors) }
               : node.id === replaceTargetId && replacement
                 ? { ...node, src: replacement.src, localPath: replacement.localPath, name: replacement.name, fileName: replacement.name }
                 : node,
           ),
-          ...appended,
-        ],
-        links: [
-          ...p.links,
-          ...appended.map((node) => ({ id: newId(), from: id, to: node.id })),
-        ],
-      }));
+            ...appended,
+          ],
+        };
+        for (const output of appended) next = appendTypedLink(next, id, output.id).project;
+        return next;
+      });
       setMessage(
         replacement
           ? "生成成功：已替换当前媒体"
@@ -2213,14 +4195,13 @@ setPanning(false);
           ? `生成成功：${generated.length} 个结果已显示并连接到画布`
           : "生成成功，但没有可预览文件",
       );
+      runRegistry.current.finish(runToken.projectId, runToken.nodeId, runToken.runId);
     } catch (error) {
-      change((p) => ({
-        ...p,
-        nodes: p.nodes.map((n) =>
-          n.id === id ? { ...n, status: "error" } : n,
-        ),
-      }));
-      setMessage(`生成失败：${String(error).replace(/^Error: /, "")}`);
+      if (runIsCurrent(runToken, runInputSignature)) {
+        setRuntimeNodeStatus(id, "error");
+        runRegistry.current.finish(runToken.projectId, runToken.nodeId, runToken.runId);
+        setMessage(`生成失败：${humanizeApiError(error)}`);
+      }
     }
   };
   const getAiTextProviderConnection = (settings: AiTextSettings) => {
@@ -2232,7 +4213,18 @@ setPanning(false);
     if (provider === "MiniMax") {
       return { provider, endpoint: preset.endpoint, apiKey: onlineProviderConfigs["MiniMax Hailuo"]?.apiKey || "", model: settings.model || preset.defaultModel, visionModel: preset.visionModel };
     }
-    return { provider: "OpenAI" as const, endpoint: openAiConfig.endpoint || preset.endpoint, apiKey: openAiConfig.apiKey || "", model: settings.model || preset.defaultModel, visionModel: preset.visionModel };
+    if (provider === "Ollama（本地）") {
+      const config = onlineProviderConfigs["Ollama（本地）"]
+        ? { ...ONLINE_PROVIDER_DEFAULTS["Ollama（本地）"], ...onlineProviderConfigs["Ollama（本地）"] }
+        : ONLINE_PROVIDER_DEFAULTS["Ollama（本地）"];
+      const model = settings.model || config.model || "";
+      return { provider, endpoint: config.endpoint, apiKey: "", model, visionModel: model };
+    }
+    if (provider !== "OpenAI" && onlineProviderConfigs[provider]) {
+      const config = { ...ONLINE_PROVIDER_DEFAULTS[provider], ...onlineProviderConfigs[provider] };
+      return { provider, endpoint: config.endpoint, apiKey: config.apiKey || "", model: settings.model || config.model || "", visionModel: config.model || preset.visionModel };
+    }
+    return { provider: "OpenAI" as const, endpoint: openAiProvider.endpoint || preset.endpoint, apiKey: openAiProvider.apiKey || "", model: settings.model || openAiProvider.model || preset.defaultModel, visionModel: preset.visionModel };
   };
   const requestAiTextProviderConfiguration = (provider: string) => {
     if (provider === "阿里百炼·通义千问") {
@@ -2241,50 +4233,67 @@ setPanning(false);
     } else if (provider === "MiniMax") {
       openOnlineConfiguration("byok", "MiniMax Hailuo");
       setMessage("请保存 MiniMax API Key；文本和视觉模型会自动匹配。");
+    } else if (provider === "Ollama（本地）") {
+      openOnlineConfiguration("byok", "Ollama（本地）");
+      setMessage("请先测试本地 Ollama 连接并选择已安装的模型。");
+    } else if (onlineProviderNames.includes(provider)) {
+      openOnlineConfiguration("byok", provider);
+      setMessage(`请完成“${provider}”的接口地址、API Key 和文本模型配置。`);
     } else {
-      configureOpenAi();
-      setMessage("请填写 OpenAI API Key；接口和模型会自动匹配。");
+      openOnlineConfiguration("byok", "OpenAI");
+      setMessage("请填写 OpenAI 或兼容接口的地址、API Key 和模型。");
     }
   };
   const describeAiTextImage = async (node: NodeItem, image: AiReferenceImage) => {
+    const sourceProjectId = activeProjectIdRef.current;
+    const isRecognitionCurrent = () =>
+      activeProjectIdRef.current === sourceProjectId &&
+      projectRef.current.nodes.some((candidate) => candidate.id === node.id);
     const settings = (node.workflow || {}) as AiTextSettings;
     const connection = getAiTextProviderConnection(settings);
-    if (!connection.apiKey) {
-      requestAiTextProviderConfiguration(connection.provider);
-      throw new Error(`请先配置 ${connection.provider} API Key`);
+    const usesOllama = connection.provider === "Ollama（本地）";
+    if (usesOllama && !connection.visionModel.trim()) {
+      throw new Error("当前 Ollama 尚未选择模型；请点底部“未配置/已配置”，选择一个支持视觉的本地模型");
+    }
+    if (!usesOllama && !connection.apiKey) {
+      throw new Error(`当前 ${connection.provider} 尚未配置 API Key；请点底部“未配置/已配置”完成设置`);
     }
     const { invoke } = await import("@tauri-apps/api/core");
     setMessage(`正在使用 ${connection.provider} 识别“${image.name}”中的人物与场景…`);
     try {
-      let imageData = image.src;
-      if (!imageData.startsWith("data:")) {
-        const blob = await fetch(imageData).then((response) => {
-          if (!response.ok) throw new Error(`无法读取图片：HTTP ${response.status}`);
-          return response.blob();
+      // Desktop references are stored in AppLocalData and displayed through
+      // convertFileSrc. Convert only this outbound request to a data URL;
+      // never write the expanded binary back into the project.
+      const imageData = await readSourceAsDataUrl(image.src);
+      const description = usesOllama
+        ? await invoke<string>("describe_ollama_image", {
+          endpoint: connection.endpoint,
+          model: connection.visionModel,
+          imageData,
+        })
+        : await invoke<string>("describe_openai_image", {
+          endpoint: connection.endpoint,
+          apiKey: connection.apiKey,
+          model: connection.visionModel,
+          imageData,
         });
-        imageData = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result || ""));
-          reader.onerror = () => reject(reader.error || new Error("图片读取失败"));
-          reader.readAsDataURL(blob);
-        });
+      if (!isRecognitionCurrent()) {
+        throw new Error("识别期间目标项目或节点已改变，结果未写入");
       }
-      const description = await invoke<string>("describe_openai_image", {
-        endpoint: connection.endpoint,
-        apiKey: connection.apiKey,
-        model: connection.visionModel,
-        imageData,
-      });
       setMessage(`已识别“${image.name}”，人物与场景信息已写入文本框。`);
       return description.trim();
     } catch (error) {
       const detail = String(error).replace(/^Error: /, "");
-      setMessage(`图片识别失败：${detail}`);
+      if (isRecognitionCurrent()) setMessage(`图片识别失败：${detail}`);
       throw error;
     }
   };
   const generateAiNode = async (node: NodeItem) => {
+    const isTextGeneration = node.kind === "aiText" || node.kind === "text";
+    const isImageGeneration = node.kind === "aiImage" || node.kind === "image";
+    const isDirectNode = node.kind === "text" || node.kind === "image";
     const settings = (node.workflow || {}) as AiTextSettings & AiImageSettings;
+    const isStoryboardFramesGeneration = isTextGeneration && settings.outputMode === "storyboardFrames";
     const upstreamNodes = project.links
       .filter((link) => link.to === node.id)
       .map((link) => project.nodes.find((item) => item.id === link.from))
@@ -2296,18 +4305,44 @@ setPanning(false);
     const upstreamImages = upstreamNodes
       .filter((item): item is NodeItem & { src: string } => item.kind === "image" && Boolean(item.src))
       .map((item) => ({ id: item.id, name: item.name, src: item.src }));
+    if (!validateExecutionGraph(node.id, isTextGeneration ? "剧本" : "图片")) return;
     if (settings.source === "cloud") {
-      setMessage("亿幕云端模型服务尚未部署；当前可先使用自带密钥验证生成节点。");
-      openOnlineConfiguration("cloud");
+      setMessage("该旧节点使用了已移除的云积分来源，请选择并保存 API Key 后重试。");
+      openOnlineConfiguration("byok");
       return;
     }
     if (settings.source === "comfy") {
       const localSettings = settings as (AiTextSettings & AiImageSettings) & { comfyWorkflowId?: string; comfyValues?: Record<string, string | number | boolean> };
-      const workflow = readComfyWorkflowLibrary().find((item) => item.id === localSettings.comfyWorkflowId);
+      const workflows = readComfyWorkflowLibrary().filter((item) => item.apiContent || item.format === "api");
+      // A newly added local generation node should be usable immediately when
+      // there is exactly one compatible workflow in the library. Requiring a
+      // second click just to choose the only option made the canvas feel as if
+      // it was redirecting to settings instead of generating.
+      const workflow = workflows.find((item) => item.id === localSettings.comfyWorkflowId)
+        || (workflows.length === 1 ? workflows[0] : undefined);
       if (!workflow) {
         setMessage("请先选择一个已扫描参数的 ComfyUI 工作流。");
         setWorkflowLibraryOpen(true);
         return;
+      }
+      const selectedComfyWorkflowSettings = !localSettings.comfyWorkflowId
+        ? { ...localSettings, comfyWorkflowId: workflow.id }
+        : null;
+      const inputProjectOverride = selectedComfyWorkflowSettings
+        ? {
+            ...projectRef.current,
+            nodes: projectRef.current.nodes.map((candidate) => candidate.id === node.id
+              ? { ...candidate, workflow: selectedComfyWorkflowSettings }
+              : candidate),
+          }
+        : undefined;
+      if (selectedComfyWorkflowSettings) {
+        change((p) => ({
+          ...p,
+          nodes: p.nodes.map((candidate) => candidate.id === node.id
+            ? { ...candidate, workflow: selectedComfyWorkflowSettings }
+            : candidate),
+        }));
       }
       const apiContent = workflow.apiContent || (workflow.format === "api" ? workflow.content : undefined);
       if (!apiContent) {
@@ -2316,88 +4351,197 @@ setPanning(false);
         return;
       }
       const configured = applyComfyParameters(apiContent, workflow.parameters || [], localSettings.comfyValues || {});
-      const runnable = injectComfyPrompt(configured, effectivePrompt);
-      setMessage(`正在使用本地工作流“${workflow.name}”运行 ${workflow.parameters?.filter((parameter) => parameter.enabled).length || 0} 项参数…`);
-      await run(node.id, undefined, runnable);
+      setMessage(`正在使用本地工作流“${workflow.name}”运行 ${workflow.parameters?.filter((parameter) => parameter.enabled).length || 0} 项参数${localSettings.comfyWorkflowId ? "…" : "（已自动选择唯一工作流）…"}`);
+      await run(node.id, undefined, configured, effectivePrompt, inputProjectOverride);
       return;
     }
-    const textConnection = node.kind === "aiText" ? getAiTextProviderConnection(settings as AiTextSettings) : null;
-    const imageSettings = node.kind === "aiImage" ? settings as AiImageSettings : null;
+    const textConnection = isTextGeneration ? getAiTextProviderConnection(settings as AiTextSettings) : null;
+    const imageSettings = isImageGeneration ? settings as AiImageSettings : null;
     const imageProvider = imageSettings?.provider || "OpenAI";
+    const savedImageProviderConfig = onlineProviderConfigs[imageProvider];
+    const defaultImageProviderConfig = ONLINE_PROVIDER_DEFAULTS[imageProvider];
+    const imageProviderConfig: OnlineProviderConfig | undefined = savedImageProviderConfig
+      ? { ...defaultImageProviderConfig, ...savedImageProviderConfig }
+      : defaultImageProviderConfig ? { ...defaultImageProviderConfig, apiKey: "" } : undefined;
     const savedGoogleConfig = onlineProviderConfigs["Google Nano Banana"];
     const googleDefaults = ONLINE_PROVIDER_DEFAULTS["Google Nano Banana"];
     const googleConfig = savedGoogleConfig ? { ...googleDefaults, ...savedGoogleConfig } : undefined;
-    if (node.kind === "aiText" && !textConnection?.apiKey) {
+    if (isTextGeneration && textConnection?.provider !== "Ollama（本地）" && !textConnection?.apiKey) {
       requestAiTextProviderConfiguration(textConnection?.provider || "OpenAI");
       return;
     }
-    if (node.kind === "aiImage" && imageProvider === "Google Nano Banana" && (!googleConfig?.endpoint || !googleConfig.apiKey)) {
+    if (isTextGeneration && textConnection?.provider === "Ollama（本地）" && !textConnection!.model.trim()) {
+      openOnlineConfiguration("byok", "Ollama（本地）");
+      setMessage("请先启动 Ollama，点击“自动读取并识别模型”，再选择已安装模型。 ");
+      return;
+    }
+    if (isImageGeneration && imageProvider === "Google Nano Banana" && (!googleConfig?.endpoint || !googleConfig.apiKey)) {
       openOnlineConfiguration("byok", "Google Nano Banana");
       setMessage("请先填写 Google AI Studio 的 Gemini API Key。");
       return;
     }
-    if (node.kind === "aiImage" && imageProvider === "OpenAI" && (!openAiConfig.endpoint || !openAiConfig.apiKey)) {
-      configureOpenAi();
-      setMessage("请先填写 OpenAI 兼容接口地址和 API Key。");
+    if (isImageGeneration && imageProvider === "OpenAI" && (!openAiProvider.endpoint || !openAiProvider.apiKey)) {
+      openOnlineConfiguration("byok", "OpenAI");
+      setMessage("请先填写 OpenAI 或兼容接口地址和 API Key。");
       return;
     }
-    if (node.kind === "aiImage" && !["OpenAI", "Google Nano Banana", "Midjourney（手动命令）"].includes(imageProvider)) {
-      setMessage(`“${imageProvider}”尚未完成图片生成协议适配，请切换到 OpenAI、Google Nano Banana 或 Midjourney 手动命令。`);
+    if (isImageGeneration && !["OpenAI", "Google Nano Banana", "Midjourney（手动命令）"].includes(imageProvider) && (!imageProviderConfig?.capabilities?.includes("image") || imageProviderConfig.protocol !== "openai")) {
+      setMessage(`“${imageProvider}”没有可用的图片生成协议；请在 API 配置中将其设为“OpenAI 兼容”并启用图片能力。`);
       return;
     }
-    change((current) => ({ ...current, nodes: current.nodes.map((item) => item.id === node.id ? { ...item, status: "running" } : item) }));
+    if (isImageGeneration && !["OpenAI", "Google Nano Banana", "Midjourney（手动命令）"].includes(imageProvider) && (!imageProviderConfig?.endpoint || !imageProviderConfig.apiKey || !imageSettings?.model)) {
+      openOnlineConfiguration("byok", imageProvider);
+      setMessage(`请先完成“${imageProvider}”的接口地址、API Key 和图片模型配置。`);
+      return;
+    }
+    const effectiveImageModel = imageSettings?.model
+      || (imageProvider === "Google Nano Banana" ? googleConfig?.model : undefined)
+      || (imageProvider === "OpenAI" ? openAiProvider.model : imageProviderConfig?.model)
+      || "gpt-image-1";
+    const imageCapabilities = imageSettings && imageProvider !== "Midjourney（手动命令）"
+      ? imageCapabilitiesFor(imageProvider, effectiveImageModel)
+      : null;
+    const normalizedImageOptions = imageSettings && imageCapabilities
+      ? normalizeImageGenerationOptions(imageCapabilities, imageSettings)
+      : null;
+    if (imageSettings && imageCapabilities && normalizedImageOptions) {
+      const optionErrors = validateImageGenerationOptions(imageCapabilities, {
+        ratio: normalizedImageOptions.ratio,
+        resolution: normalizedImageOptions.resolution,
+        amount: normalizedImageOptions.amount,
+        quality: normalizedImageOptions.quality,
+      });
+      if (optionErrors.length) {
+        setMessage(`图片参数无效：${optionErrors.join("；")}`);
+        return;
+      }
+    }
+    const normalizedWorkflow = normalizedImageOptions && imageSettings
+      ? { ...imageSettings, ...normalizedImageOptions, model: effectiveImageModel }
+      : node.workflow;
+    // React may batch the following state write until this event completes.
+    // Sign the same projected node state now, rather than reading a ref that
+    // still contains the pre-normalisation workflow for one render tick.
+    const inputProject = {
+      ...projectRef.current,
+      nodes: projectRef.current.nodes.map((item) => item.id === node.id
+        ? { ...item, workflow: normalizedWorkflow }
+        : item),
+    };
+    change((current) => ({
+      ...current,
+      nodes: current.nodes.map((item) => item.id === node.id
+        ? { ...item, workflow: normalizedWorkflow }
+        : item),
+    }));
+    // Persist any capability-normalized image settings before taking the
+    // execution snapshot. Otherwise the app would invalidate its own task as
+    // soon as the normalized ratio/quality reached project state.
+    const runToken = runRegistry.current.start(activeProjectIdRef.current, node.id);
+    const runInputSignature = createExecutionInputSignature(inputProject, node.id);
+    setRuntimeNodeStatus(node.id, "running");
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      if (node.kind === "aiText") {
+      if (isTextGeneration) {
         const textSettings = settings as AiTextSettings;
-        const systemPrompt = [
-          "你是一名专业影视编剧。请直接输出结构完整、可拍摄的中文剧本。",
-          `题材：${textSettings.genre || "剧情短片"}`,
-          `格式：${textSettings.format || "标准影视剧本"}`,
-          `篇幅：${textSettings.length || "中篇"}`,
-          `风格：${textSettings.tone || "电影感"}`,
-          `集数：${textSettings.episodeCount || 1}，每集约 ${textSettings.episodeMinutes || 5} 分钟`,
-          textSettings.includeCharacters ? "先给出人物小传。" : "",
-          textSettings.includeStoryboard ? "剧本后附关键分镜建议。" : "",
-          "必须包含场次、时间、地点、人物、动作和对白，不要解释创作过程。",
-        ].filter(Boolean).join("\n");
-        const result = await invoke<string>("generate_openai_text", {
-          endpoint: textConnection!.endpoint,
-          apiKey: textConnection!.apiKey,
-          prompt: effectivePrompt,
-          model: textConnection!.model,
-          systemPrompt,
-          temperature: textSettings.creativity || 0.8,
-        });
-        const output: NodeItem = { id: newId(), kind: "text", x: node.x + node.width + 90, y: node.y, width: 420, height: 320, name: "AI 完整剧本", text: result, status: "done", createdAt: Date.now() };
-        change((current) => ({ ...current, nodes: [...current.nodes.map((item) => item.id === node.id ? { ...item, status: "done" } : item), output], links: [...current.links, { id: newId(), from: node.id, to: output.id }] }));
-        setMessage("完整剧本已生成并连接到画布");
+        const storyboardFrames = normalizeStoryboardFramePlans(textSettings.storyboardFrames);
+        const systemPrompt = isStoryboardFramesGeneration
+          ? storyboardGenerationSystemPrompt({
+              frames: storyboardFrames,
+              ratio: textSettings.storyboardRatio || "16:9",
+              style: textSettings.storyboardStyle || "电影写实",
+              language: textSettings.language || "简体中文",
+            })
+          : [
+              "你是一名专业影视编剧。请直接输出结构完整、可拍摄的中文剧本。",
+              `题材：${textSettings.genre || "剧情短片"}`,
+              `格式：${textSettings.format || "标准影视剧本"}`,
+              `篇幅：${textSettings.length || "中篇"}`,
+              `风格：${textSettings.tone || "电影感"}`,
+              `集数：${textSettings.episodeCount || 1}，每集约 ${textSettings.episodeMinutes || 5} 分钟`,
+              textSettings.includeCharacters ? "先给出人物小传。" : "",
+              textSettings.includeStoryboard ? "剧本后附关键分镜建议。" : "",
+              "必须包含场次、时间、地点、人物、动作和对白，不要解释创作过程。",
+            ].filter(Boolean).join("\n");
+        const result = textConnection!.provider === "Ollama（本地）"
+          ? await invoke<string>("generate_ollama_text", {
+              endpoint: textConnection!.endpoint,
+              prompt: effectivePrompt,
+              model: textConnection!.model,
+              systemPrompt,
+              temperature: textSettings.creativity || 0.8,
+            })
+          : await invoke<string>("generate_openai_text", {
+              endpoint: textConnection!.endpoint,
+              apiKey: textConnection!.apiKey,
+              prompt: effectivePrompt,
+              model: textConnection!.model,
+              systemPrompt,
+              temperature: textSettings.creativity || 0.8,
+            });
+        if (!canCommitRunWithInputs(runToken, runInputSignature)) return;
+        if (isStoryboardFramesGeneration) {
+          const rows: StoryboardRow[] = parseGeneratedStoryboard(result, storyboardFrames);
+          const output: NodeItem = {
+            id: newId(),
+            kind: "storyboard",
+            x: node.x + node.width + 90,
+            y: node.y,
+            width: nodeSize.storyboard[0],
+            height: Math.min(620, Math.max(nodeSize.storyboard[1], 104 + rows.length * 52)),
+            name: `AI 分镜画面（${rows.length}个）`,
+            storyboard: rows,
+            text: storyboardText(rows),
+            status: "done",
+            createdAt: Date.now(),
+          };
+          change((current) => appendTypedLink({ ...current, nodes: [...current.nodes.map((item) => item.id === node.id ? { ...item, status: "done" } : item), output] }, node.id, output.id).project);
+          setActiveAiNode(null);
+          setActiveStoryboard(output.id);
+          setSelected([output.id]);
+          setMessage(`已生成 ${rows.length} 个分镜画面；可在分镜表格中继续添加或修改。`);
+        } else if (isDirectNode) {
+          change((current) => ({ ...current, nodes: current.nodes.map((item) => item.id === node.id ? { ...item, text: result, status: "done" } : item) }));
+          setMessage("AI 剧本已直接写入当前文本节点");
+        } else {
+          const output: NodeItem = { id: newId(), kind: "text", x: node.x + node.width + 90, y: node.y, width: 420, height: 320, name: "AI 完整剧本", text: result, status: "done", createdAt: Date.now() };
+          change((current) => appendTypedLink({ ...current, nodes: [...current.nodes.map((item) => item.id === node.id ? { ...item, status: "done" } : item), output] }, node.id, output.id).project);
+          setMessage("完整剧本已生成并连接到画布");
+        }
+        runRegistry.current.finish(runToken.projectId, runToken.nodeId, runToken.runId);
       } else {
-        const currentImageSettings = imageSettings!;
+        const currentImageSettings = { ...imageSettings!, ...(normalizedImageOptions || {}), model: effectiveImageModel };
         const fullPrompt = [effectivePrompt, `视觉风格：${currentImageSettings.style || "电影写实"}`, currentImageSettings.negativePrompt ? `避免：${currentImageSettings.negativePrompt}` : ""].filter(Boolean).join("\n");
         const references = [...upstreamImages, ...(currentImageSettings.references || []).filter((reference) => !upstreamImages.some((item) => item.id === reference.id))];
         if (imageProvider === "Midjourney（手动命令）") {
           const command = `/imagine prompt: ${fullPrompt.replace(/\s+/g, " ").trim()} --ar ${currentImageSettings.ratio || "1:1"}`;
           try { await navigator.clipboard.writeText(command); } catch { /* Clipboard permissions can be denied; the text node remains available. */ }
+          if (!canCommitRunWithInputs(runToken, runInputSignature)) return;
           const output: NodeItem = { id: newId(), kind: "text", x: node.x + node.width + 90, y: node.y, width: 520, height: 220, name: "Midjourney 手动命令", text: command, status: "done", createdAt: Date.now() };
-          change((current) => ({ ...current, nodes: [...current.nodes.map((item) => item.id === node.id ? { ...item, status: "done" } : item), output], links: [...current.links, { id: newId(), from: node.id, to: output.id }] }));
+          change((current) => ({ ...current, nodes: [...current.nodes.map((item) => item.id === node.id ? { ...item, status: "done" } : item), output] }));
+          runRegistry.current.finish(runToken.projectId, runToken.nodeId, runToken.runId);
           setMessage("Midjourney 官方未开放公共 API；已生成安全的手动命令并尝试复制，请到官方网页或 Discord 提交后导回结果。");
           return;
         }
-        const toDataUrl = async (source: string) => {
-          if (!source || source.startsWith("data:")) return source;
-          const blob = await fetch(source).then((response) => {
-            if (!response.ok) throw new Error(`无法读取参考图：HTTP ${response.status}`);
-            return response.blob();
-          });
-          return await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(String(reader.result || ""));
-            reader.onerror = () => reject(reader.error || new Error("参考图读取失败"));
-            reader.readAsDataURL(blob);
-          });
-        };
-        const referenceData = await Promise.all(references.slice(0, 14).map((reference) => toDataUrl(reference.src)));
+        if (currentImageSettings.mode === "image" && references.length === 0) {
+          throw new Error("图生图模式需要先添加或连接至少一张参考图片");
+        }
+        const referenceLimit = imageCapabilities?.referenceImageLimit ?? 1;
+        if (references.length > 0 && referenceLimit === 0) {
+          throw new Error(`模型“${effectiveImageModel}”不支持图片参考，请切换到文生图或选择支持图生图的模型`);
+        }
+        // Managed desktop files are previewed from AppLocalData. Convert an
+        // image to a Data URL only at the moment an external provider needs
+        // it; it is never written back into the project JSON.
+        const referenceData = await Promise.all(references.slice(0, referenceLimit).map((reference) => readSourceAsDataUrl(reference.src)));
+        if (!canCommitRunWithInputs(runToken, runInputSignature)) return;
+        const requestSize = imageCapabilities && normalizedImageOptions?.resolution
+          ? imageRequestSizeFor(
+              imageCapabilities,
+              normalizedImageOptions.ratio as ImageAspectRatio,
+              normalizedImageOptions.resolution as ImageResolution,
+            )
+          : undefined;
         const src = imageProvider === "Google Nano Banana"
           ? await invoke<string>("generate_google_image", {
               endpoint: googleConfig!.endpoint,
@@ -2410,31 +4554,47 @@ setPanning(false);
             })
           : referenceData[0]
           ? await invoke<string>("generate_openai_image_edit", {
-              endpoint: openAiConfig.endpoint,
-              apiKey: openAiConfig.apiKey,
+              endpoint: imageProvider === "OpenAI" ? openAiProvider.endpoint : imageProviderConfig!.endpoint,
+              apiKey: imageProvider === "OpenAI" ? openAiProvider.apiKey : imageProviderConfig!.apiKey,
               prompt: fullPrompt,
-              model: currentImageSettings.model || "gpt-image-1",
+              model: effectiveImageModel,
               imageData: referenceData[0],
+              size: requestSize,
+              quality: normalizedImageOptions?.quality,
             })
           : await invoke<string>("generate_openai_image", {
-              endpoint: openAiConfig.endpoint,
-              apiKey: openAiConfig.apiKey,
+              endpoint: imageProvider === "OpenAI" ? openAiProvider.endpoint : imageProviderConfig!.endpoint,
+              apiKey: imageProvider === "OpenAI" ? openAiProvider.apiKey : imageProviderConfig!.apiKey,
               prompt: fullPrompt,
-              model: currentImageSettings.model || "gpt-image-1",
+              model: effectiveImageModel,
+              size: requestSize,
+              quality: normalizedImageOptions?.quality,
             });
-        const [width, height] = nodeSize.image;
-        const output: NodeItem = { id: newId(), kind: "image", x: node.x + node.width + 90, y: node.y, width, height, name: `AI图片-${Date.now()}.png`, fileName: `AI图片-${Date.now()}.png`, src, status: "done", createdAt: Date.now() };
-        change((current) => ({ ...current, nodes: [...current.nodes.map((item) => item.id === node.id ? { ...item, status: "done", src } : item), output], links: [...current.links, { id: newId(), from: node.id, to: output.id }] }));
-        setMessage(`${imageProvider === "Google Nano Banana" ? "Nano Banana" : "OpenAI"} 图片已生成并连接到画布${upstreamText.length ? `；已合并 ${upstreamText.length} 个文本输入` : ""}${references.length ? `；已使用 ${Math.min(references.length, 14)} 张参考图` : ""}`);
+        if (!canCommitRunWithInputs(runToken, runInputSignature)) return;
+        if (isDirectNode) {
+          change((current) => ({ ...current, nodes: current.nodes.map((item) => item.id === node.id ? { ...item, status: "done", src, fileName: `AI图片-${Date.now()}.png` } : item) }));
+          setMessage(`${imageProvider === "Google Nano Banana" ? "Nano Banana" : "OpenAI"} 图片已直接生成到当前图片节点`);
+        } else {
+          const [width, height] = nodeSize.image;
+          const output: NodeItem = { id: newId(), kind: "image", x: node.x + node.width + 90, y: node.y, width, height, name: `AI图片-${Date.now()}.png`, fileName: `AI图片-${Date.now()}.png`, src, status: "done", createdAt: Date.now() };
+          change((current) => appendTypedLink({ ...current, nodes: [...current.nodes.map((item) => item.id === node.id ? { ...item, status: "done", src } : item), output] }, node.id, output.id).project);
+          setMessage(`${imageProvider === "Google Nano Banana" ? "Nano Banana" : "OpenAI"} 图片已生成并连接到画布${upstreamText.length ? `；已合并 ${upstreamText.length} 个文本输入` : ""}${references.length ? `；已使用 ${Math.min(references.length, 14)} 张参考图` : ""}`);
+        }
+        runRegistry.current.finish(runToken.projectId, runToken.nodeId, runToken.runId);
       }
     } catch (error) {
-      change((current) => ({ ...current, nodes: current.nodes.map((item) => item.id === node.id ? { ...item, status: "error" } : item) }));
-      setMessage(`AI 生成失败：${String(error).replace(/^Error: /, "")}`);
+      if (canCommitRunWithInputs(runToken, runInputSignature)) {
+        setRuntimeNodeStatus(node.id, "error");
+        runRegistry.current.finish(runToken.projectId, runToken.nodeId, runToken.runId);
+        setMessage(`AI 生成失败：${humanizeApiError(error)}`);
+      }
     }
   };
   const resize = (e: PointerEvent, id: string) => {
     e.stopPropagation();
     const n = project.nodes.find((x) => x.id === id)!;
+    const startProject = project;
+    let resized = false;
     const sx = e.clientX,
       sy = e.clientY,
       w = n.width,
@@ -2443,12 +4603,27 @@ setPanning(false);
       (n.kind === "image" || n.kind === "video") &&
       n.mediaWidth &&
       n.mediaHeight;
-    const move = (ev: globalThis.PointerEvent) =>
+    const preservePointerRatio = n.kind === "annotationPointer";
+    const move = (ev: globalThis.PointerEvent) => {
+      resized = true;
       frameChange((p) => ({
         ...p,
         nodes: p.nodes.map((x) => {
           if (x.id !== id) return x;
-          const width = Math.max(170, w + (ev.clientX - sx) / p.view.zoom);
+          const minWidth = n.kind === "annotation" ? 140 : n.kind === "annotationPointer" ? 32 : 170;
+          const minHeight = n.kind === "annotation" ? 70 : n.kind === "annotationPointer" ? 32 : 90;
+          const width = Math.max(minWidth, w + (ev.clientX - sx) / p.view.zoom);
+          if (x.kind === "annotation") {
+            const dx = (ev.clientX - sx) / p.view.zoom;
+            const dy = (ev.clientY - sy) / p.view.zoom;
+            const horizontalResize = Math.abs(dx) > Math.abs(dy) * 1.5;
+            const baseFontSize = n.fontSize ?? 19;
+            const fontSize = horizontalResize
+              ? baseFontSize
+              : Math.max(12, Math.min(48, baseFontSize * (width / Math.max(1, w))));
+            const { width: annotationWidth, height: annotationHeight } = annotationMetrics(x.text, width, fontSize);
+            return { ...x, width: annotationWidth, height: annotationHeight, fontSize };
+          }
           return preserveMediaRatio
             ? {
                 ...x,
@@ -2458,16 +4633,52 @@ setPanning(false);
                   Math.round((width * n.mediaHeight!) / n.mediaWidth!) + 29,
                 ),
               }
+            : preservePointerRatio
+              ? {
+                  ...x,
+                  width: Math.min(220, width),
+                  height: Math.max(minHeight, Math.round(Math.min(220, width) * h / Math.max(1, w))),
+                }
             : {
                 ...x,
                 width,
-                height: Math.max(90, h + (ev.clientY - sy) / p.view.zoom),
+                height: Math.max(minHeight, h + (ev.clientY - sy) / p.view.zoom),
               };
         }),
       }));
+    };
     const end = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", end);
+      if (resized) undoHistory.current = [...undoHistory.current.slice(-5), startProject];
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+  };
+  const rotateAnnotation = (e: PointerEvent, id: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const n = project.nodes.find((item) => item.id === id);
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!n || !rect || n.locked) return;
+    const centerX = rect.left + project.view.x + (n.x + n.width / 2) * project.view.zoom;
+    const centerY = rect.top + project.view.y + (n.y + n.height / 2) * project.view.zoom;
+    const startAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX) * 180 / Math.PI;
+    const startRotation = n.rotation || 0;
+    const startProject = project;
+    let rotated = false;
+    const move = (event: globalThis.PointerEvent) => {
+      const angle = Math.atan2(event.clientY - centerY, event.clientX - centerX) * 180 / Math.PI;
+      rotated = true;
+      frameChange((p) => ({
+        ...p,
+        nodes: p.nodes.map((item) => item.id === id ? { ...item, rotation: startRotation + angle - startAngle } : item),
+      }));
+    };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      if (rotated) undoHistory.current = [...undoHistory.current.slice(-5), startProject];
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", end);
@@ -2503,29 +4714,57 @@ setPanning(false);
     top: `calc(50% - ${portWorldSize / 2}px)`,
   };
   return (
-<main className={`app theme-${theme}`} onContextMenu={(e) => e.preventDefault()}>
-      {intro !== "off" && (
-        <section className={`intro-screen ${intro}`}>
-          <div className="intro-orbit" />
-          <div className="intro-core">
-            <i>✦</i>
-            <small>亿幕画布</small>
-            <button
-              disabled={intro !== "ready"}
-              onClick={() => setIntro("off")}
-            >
-              亿幕
-            </button>
-          </div>
-          <p>{intro === "animating" ? "正在展开创作空间" : "创造新奇迹"}</p>
-        </section>
-      )}
+<main className={`app theme-${resolvedTheme}`} onContextMenu={(e) => e.preventDefault()}>
+      {cinematicLandingOpen && <CinematicLanding
+        onEnterCanvas={() => setCinematicLandingOpen(false)}
+        onOpenScript={() => {
+          setCinematicLandingOpen(false);
+          addAtViewport("aiText", {
+            name: "AI 剧本生成",
+            workflow: {
+              source: "byok", provider: "OpenAI", model: "gpt-4.1-mini",
+              genre: "剧情短片", format: "标准影视剧本", length: "中篇",
+              tone: "电影感", audience: "大众", language: "简体中文",
+              creativity: 0.8, episodeCount: 1, episodeMinutes: 5,
+              includeStoryboard: true, includeCharacters: true,
+            } satisfies AiTextSettings,
+          });
+        }}
+        onOpenImage={() => {
+          setCinematicLandingOpen(false);
+          addAtViewport("aiImage", {
+            name: "AI 图片生成",
+            workflow: {
+              source: "byok", provider: "OpenAI", model: "gpt-image-1",
+              mode: "text", ratio: "1:1", resolution: "1024",
+              amount: 1, quality: "low", style: "电影写实", seed: -1, guidance: 7,
+            } satisfies AiImageSettings,
+          });
+        }}
+        onGenerate={(prompt) => {
+          setCinematicLandingOpen(false);
+          addAtViewport("aiImage", {
+            name: "AI 图片生成",
+            workflow: {
+              source: "byok", provider: "OpenAI", model: "gpt-image-1",
+              mode: "text", prompt: prompt || "雨夜天台，电影感，克制留白",
+              ratio: "1:1", resolution: "1024", amount: 1,
+              quality: "low", style: "电影写实", seed: -1, guidance: 7,
+            } satisfies AiImageSettings,
+          });
+        }}
+        projectName={projectName}
+        onProjectNameChange={updateActiveProjectName}
+      />}
       <header className="topbar">
+        <div className="topbar-drag-region" data-tauri-drag-region aria-hidden="true" />
         <div className="brand">
-          <i className={`connection-dot ${comfyConnected ? "connected" : "disconnected"}`} />
+          <i className={`connection-dot ${comfyConnected ? "connected" : "disconnected"}`} title={comfyConnected ? "ComfyUI 已连接" : "ComfyUI 未连接"} />
           <b>亿幕画布</b>
-          <span>{message}</span>
         </div>
+        <label className="canvas-project-name" title="点击修改项目名称">
+          <input value={projectName} onChange={(event) => updateActiveProjectName(event.target.value)} aria-label="项目名称" />
+        </label>
         <div className="top-actions">
           <button onClick={newProject}>新建项目</button>
           <button onClick={openMediaLibrary} title="素材库" className="media-lib-btn"><span className="media-lib-grid-icon"><span></span><span></span><span></span><span></span></span></button>
@@ -2534,6 +4773,15 @@ setPanning(false);
             {topMenuOpen && (
               <div className="top-menu">
                 <button onClick={() => { exportProject(); setTopMenuOpen(false); }}>导出项目</button>
+                {(legacyMigrationProgress.running || legacyMigrationPlan.items.length > 0) && <button
+                  disabled={legacyMigrationProgress.running}
+                  title="把旧项目内嵌在浏览器存储中的图片、视频、音频逐项迁入桌面本机素材仓库"
+                  onClick={() => void migrateLegacyMedia()}
+                >
+                  {legacyMigrationProgress.running
+                    ? `迁移旧媒体 ${legacyMigrationProgress.completed + legacyMigrationProgress.failed + legacyMigrationProgress.skipped}/${legacyMigrationProgress.total}`
+                    : `迁移旧媒体到本机素材仓库（${legacyMigrationPlan.items.length}）`}
+                </button>}
                 <label className="button">
                   打开项目
                   <input type="file" accept=".json" onChange={(e) => { importProject(e); setTopMenuOpen(false); }} />
@@ -2546,6 +4794,11 @@ setPanning(false);
               </div>
             )}
           </div>
+        </div>
+        <div className="window-controls" aria-label="窗口控制">
+          <button title="最小化" aria-label="最小化" onPointerDown={(e) => e.stopPropagation()} onClick={() => void getCurrentWindow().minimize().catch((error) => setMessage(`最小化失败：${String(error)}`))}>−</button>
+          <button title="最大化或还原" aria-label="最大化或还原" onPointerDown={(e) => e.stopPropagation()} onClick={() => void getCurrentWindow().toggleMaximize().catch((error) => setMessage(`最大化失败：${String(error)}`))}>□</button>
+          <button className="window-close" title="关闭应用" aria-label="关闭应用" onPointerDown={(e) => e.stopPropagation()} onClick={() => void closeApplication()}>×</button>
         </div>
       </header>
       {settings && (
@@ -2561,28 +4814,10 @@ setPanning(false);
       {preferences && (
         <section className="settings app-preferences">
           <b>画布设置</b>
-          <label className="setting-row">
-            <span>重新打开程序时显示开场</span>
-            <input
-              type="checkbox"
-              checked={introEnabled}
-              onChange={(e) => {
-                setIntroEnabled(e.target.checked);
-                if (!e.target.checked) setIntro("off");
-              }}
-            />
-          </label>
-          <small>关闭后，下一次打开亿幕画布将直接进入上次项目。</small>
           <label>默认项目保存位置</label>
           <div className="setting-path">
             <input value={defaultSaveDir} onChange={(e) => setDefaultSaveDir(e.target.value)} />
             <button onClick={chooseDefaultSaveDir}>更改</button>
-          </div>
-          <label>个性化色调</label>
-          <div className="theme-options">
-            <button className={theme === "mint" ? "active" : ""} onClick={() => setTheme("mint")}>青绿</button>
-            <button className={theme === "blue" ? "active" : ""} onClick={() => setTheme("blue")}>蓝色</button>
-            <button className={theme === "purple" ? "active" : ""} onClick={() => setTheme("purple")}>紫色</button>
           </div>
           <b className="history-title">历史项目</b>
           <button className="log-button" onClick={() => setLogsOpen(!logsOpen)}>运行日志</button>
@@ -2602,16 +4837,16 @@ setPanning(false);
         <div className="online-provider-backdrop" onPointerDown={() => setOnlineApiOpen(false)}>
           <section className="online-provider-dialog" onPointerDown={(event) => event.stopPropagation()}>
             <header>
-              <div><span>生成来源</span><b>在线服务配置</b><small>自带密钥仅保存在本机；亿幕云端需要独立服务器与账户系统。</small></div>
+              <div><span>工作流连接</span><b>{serviceConfigSection === "models" ? "模型 API 配置" : "MCP 工具配置"}</b><small>{serviceConfigSection === "models" ? "按文本、图片、视频能力独立管理平台与模型。" : "连接 Streamable HTTP MCP 服务并读取可用工具。"}</small></div>
               <button className="dialog-close" title="关闭" onClick={() => setOnlineApiOpen(false)}>×</button>
             </header>
             <nav className="online-provider-tabs" aria-label="在线服务来源">
-              <button className={onlineConfigTab === "byok" ? "active" : ""} onClick={() => setOnlineConfigTab("byok")}>自带密钥</button>
-              <button className={onlineConfigTab === "cloud" ? "active" : ""} onClick={() => setOnlineConfigTab("cloud")}>亿幕云端积分</button>
+              <button className={serviceConfigSection === "models" ? "active" : ""} onClick={() => setServiceConfigSection("models")}>模型 API</button>
+              <button className={serviceConfigSection === "mcp" ? "active" : ""} onClick={() => setServiceConfigSection("mcp")}>MCP 工具</button>
             </nav>
-            {onlineConfigTab === "byok" ? <>
+            {serviceConfigSection === "models" ? <>
               <label>平台
-                <span className="provider-select-row"><select value={onlineConfigProvider} onChange={(event) => setOnlineConfigProvider(event.target.value)}>
+                <span className="provider-select-row"><select value={onlineConfigProvider} onChange={(event) => { const provider = event.target.value; setOnlineConfigProvider(provider); setProviderModelDraft(resolvedProviderConfig(provider)?.model || ""); setProviderTestResult(null); }}>
                   {onlineProviderNames.map((provider) => <option key={provider}>{provider}{onlineProviderConfigs[provider]?.custom ? " · 自定义" : ""}</option>)}
                 </select><button type="button" onClick={() => setAddingCustomProvider(!addingCustomProvider)}>＋ 添加平台</button></span>
               </label>
@@ -2619,42 +4854,109 @@ setPanning(false);
               <label>接口地址
                 <input value={selectedOnlineProvider.endpoint} onChange={(event) => updateOnlineProviderConfig({ endpoint: event.target.value })} />
               </label>
-              <label>{onlineConfigProvider === "可灵 Kling" ? "Access Key" : onlineConfigProvider === "Google Nano Banana" ? "Gemini API Key" : "API 密钥"}
-                <input type="password" value={selectedOnlineProvider.apiKey} onChange={(event) => updateOnlineProviderConfig({ apiKey: event.target.value })} placeholder={onlineConfigProvider === "可灵 Kling" ? "粘贴可灵 Access Key" : onlineConfigProvider === "Google Nano Banana" ? "粘贴 Google AI Studio 的 Gemini API Key" : "粘贴平台 API Key"} />
+              <label>接口协议
+                <select value={selectedOnlineProvider.protocol || "openai"} onChange={(event) => updateOnlineProviderConfig({ protocol: event.target.value as ProviderProtocol })} disabled={!selectedOnlineProvider.custom}>
+                  <option value="openai">OpenAI 兼容</option><option value="gemini">Google Gemini</option><option value="ollama">Ollama</option><option value="dashscope">阿里 DashScope</option><option value="kling">可灵</option><option value="volcengine">火山方舟</option>
+                </select>
               </label>
-              {onlineConfigProvider === "可灵 Kling" && <label>Secret Key
+              {onlineConfigProvider === "可灵 Kling" && <label>认证方式
+                <select value={selectedOnlineProvider.klingAuth || "apiKey"} onChange={(event) => updateOnlineProviderConfig({ klingAuth: event.target.value as "apiKey" | "aksk", ...(event.target.value === "apiKey" ? { apiSecret: "" } : {}) })}>
+                  <option value="apiKey">单 API Key（新版开放平台）</option>
+                  <option value="aksk">Access Key + Secret Key（旧版签名）</option>
+                </select>
+              </label>}
+              {onlineConfigProvider !== "Ollama（本地）" && <label>{onlineConfigProvider === "可灵 Kling" ? (selectedOnlineProvider.klingAuth === "aksk" ? "Access Key" : "API Key") : onlineConfigProvider === "Google Nano Banana" ? "Gemini API Key" : "API 密钥"}
+                <input type="password" value={selectedOnlineProvider.apiKey} onChange={(event) => updateOnlineProviderConfig({ apiKey: event.target.value })} placeholder={onlineConfigProvider === "可灵 Kling" ? (selectedOnlineProvider.klingAuth === "aksk" ? "粘贴可灵 Access Key" : "粘贴可灵单 API Key") : onlineConfigProvider === "Google Nano Banana" ? "粘贴 Google AI Studio 的 Gemini API Key" : "粘贴平台 API Key"} />
+              </label>}
+              {onlineConfigProvider === "可灵 Kling" && selectedOnlineProvider.klingAuth === "aksk" && <label>Secret Key
                 <input type="password" value={selectedOnlineProvider.apiSecret || ""} onChange={(event) => updateOnlineProviderConfig({ apiSecret: event.target.value })} placeholder="粘贴可灵 Secret Key（只保存在本机）" />
               </label>}
-              {["可灵 Kling", "豆包·火山方舟", "Google Nano Banana"].includes(onlineConfigProvider)
-                ? <div className="provider-model-discovery"><small>{onlineConfigProvider === "Google Nano Banana" ? "该平台使用 Gemini 图片协议，已内置图片模型、分辨率与多图参考能力识别。" : "该平台使用专用视频协议，已内置模型用途识别；也可在下面填写控制台实际开通的模型 ID。"}</small></div>
-                : <div className="provider-model-discovery"><button disabled={discoveringModels || !selectedOnlineProvider.endpoint?.trim()} onClick={() => void discoverProviderModels()}>{discoveringModels ? "正在读取模型…" : "自动读取并识别模型"}</button><small>适用于提供 OpenAI 兼容 `/models` 接口的平台；密钥只在本机请求时使用。</small></div>}
-              <label>默认模型
-                <input list="online-provider-model-options" value={selectedOnlineProvider.model} onChange={(event) => updateOnlineProviderConfig({ model: event.target.value })} placeholder="填写控制台中的模型 ID" />
-                {selectedOnlineProvider.detectedModels?.length ? <datalist id="online-provider-model-options">{selectedOnlineProvider.detectedModels.map((model) => <option value={model.id} key={model.id}>{model.purpose}</option>)}</datalist> : null}
+              <section className="provider-model-library">
+                <header><div><b>平台模型库</b><small>接口地址和密钥只配置一次，下面所有模型与节点共用</small></div><button type="button" onClick={() => setProviderModelDraft("")}>＋ 添加模型</button></header>
+                {(selectedOnlineProvider.detectedModels || []).length > 0 ? <div className="provider-model-library-list">{(selectedOnlineProvider.detectedModels || []).map((model) => {
+                  const capabilities = capabilitiesForModel(model);
+                  const active = providerModelDraft === model.id;
+                  return <article className={active ? "active" : ""} key={model.id}>
+                    <button type="button" className="provider-model-library-main" onClick={() => setProviderModelDraft(model.id)}><b>{model.id}</b><small>{capabilities.length ? capabilities.map(modelCapabilityLabel).join(" / ") : "能力待确认"}</small></button>
+                    <div><button type="button" className={selectedOnlineProvider.model === model.id ? "default" : ""} disabled={selectedOnlineProvider.model === model.id} onClick={() => setDefaultProviderModel(model.id)}>{selectedOnlineProvider.model === model.id ? "默认" : "设为默认"}</button><button type="button" className="remove" onClick={() => removeProviderModel(model.id)}>移除</button></div>
+                  </article>;
+                })}</div> : <div className="provider-model-library-empty">还没有保存模型。点击“添加模型”，填写模型 ID 并选择能力即可。</div>}
+              </section>
+              <label>正在编辑的模型
+                <span className="provider-model-edit-row"><input
+                  list="online-provider-model-options"
+                  value={providerModelDraft}
+                  onChange={(event) => setProviderModelDraft(event.target.value)}
+                  onKeyDown={(event) => event.key === "Enter" && addOrUpdateProviderModel()}
+                  placeholder="输入模型 ID，例如 wan2.6-t2v"
+                  spellCheck={false}
+                /><button type="button" disabled={!providerModelDraft.trim()} onClick={addOrUpdateProviderModel}>加入模型库</button></span>
+                {selectedOnlineProviderModels.length > 0 && <datalist id="online-provider-model-options">
+                  {selectedOnlineProviderModels.map((model) => <option value={model.id} key={model.id}>{model.purpose}</option>)}
+                </datalist>}
+                <small className="provider-model-choice-note">添加或切换模型不会清空接口地址和 API 密钥。{selectedOnlineProviderModel?.purpose || (onlineConfigProvider === "可灵 Kling" ? "可灵任务列表不返回模型清单，可直接填写平台实际开放的模型 ID。" : "也可以先自动读取模型，再从模型库中选择。")}</small>
               </label>
-              {selectedOnlineProvider.detectedModels?.length ? <div className="detected-model-summary">{(["text", "image", "video", "unknown"] as const).map((kind) => { const count = selectedOnlineProvider.detectedModels!.filter((model) => model.kind === kind).length; return count ? <span className={kind} key={kind}>{kind === "text" ? "文本" : kind === "image" ? "图片" : kind === "video" ? "视频" : "待确认"} {count}</span> : null; })}<small>系统只在对应类型节点展示已确认模型；“待确认”模型不会自动调用。</small></div> : null}
-              <small className="online-provider-note">保存后，AI 节点会按识别到的模型类型和能力自动筛选。不同平台的生成提交协议仍可能不同；只有完成协议适配的平台才会真正发起任务。</small>
+              {editedProviderModelId && <div className="provider-model-capabilities">
+                <span>这个模型用于</span>
+                {(["text", "image", "video"] as ModelCapability[]).map((capability) => <label key={capability}>
+                  <input
+                    type="checkbox"
+                    checked={selectedOnlineProviderModelCapabilities.includes(capability)}
+                    onChange={(event) => setConfiguredModelCapability(capability, event.target.checked)}
+                  />
+                  {modelCapabilityLabel(capability)}生成
+                </label>)}
+                <small>按模型真实的输出能力勾选，可多选；同一个模型会同时出现在相应节点中。</small>
+              </div>}
+              <div className="provider-model-discovery">
+                {!["可灵 Kling", "豆包·火山方舟", "Google Nano Banana"].includes(onlineConfigProvider) && <button disabled={discoveringModels || !selectedOnlineProvider.endpoint?.trim()} onClick={() => void discoverProviderModels()}>{discoveringModels ? "正在读取模型…" : "自动读取并识别模型"}</button>}
+                <button className="provider-test-button" disabled={testingProvider || !selectedOnlineProvider.endpoint?.trim() || (onlineConfigProvider !== "Ollama（本地）" && !selectedOnlineProvider.apiKey?.trim())} onClick={() => void testOnlineProvider()}>{testingProvider ? "正在测试…" : "测试连接"}</button>
+                <small>{onlineConfigProvider === "Ollama（本地）" ? "测试会读取本机 Ollama 已安装模型；不需要 API Key，也不会创建生成任务。" : onlineConfigProvider === "Google Nano Banana" ? "测试会读取 Gemini 模型权限；不创建图片，不扣生成额度。" : onlineConfigProvider === "可灵 Kling" ? (selectedOnlineProvider.klingAuth === "aksk" ? "测试会用 Access Key + Secret Key 生成签名并读取任务列表；不创建视频任务。" : "测试会使用单 API Key 读取任务列表；不创建视频任务。") : onlineConfigProvider === "豆包·火山方舟" ? "测试会读取模型/推理接入点权限；不创建视频任务。" : "测试会访问模型接口，不会创建生成任务；密钥只在本机请求时使用。"}</small>
+              </div>
+              {providerTestResult && <div className={`provider-test-result ${providerTestResult.ok ? "success" : "error"}`}>{providerTestResult.ok ? "✓ " : "! "}{providerTestResult.text}</div>}
+              <small className="online-provider-note">连接测试通过后，保存上方模型；系统会按模型能力在文本、图片、视频节点中显示对应选项。</small>
               <footer>
-                <button className="primary" onClick={() => { const next = { ...onlineProviderConfigs, [onlineConfigProvider]: selectedOnlineProvider as OnlineProviderConfig }; setOnlineProviderConfigs(next); localStorage.setItem(ONLINE_PROVIDER_STORE, JSON.stringify(next)); setMessage(`${onlineConfigProvider} 的自带密钥配置已保存到本机`); setOnlineApiOpen(false); }}>保存本机配置</button>
+                <button className="primary" onClick={() => {
+                  const normalizedDraft = normalizeExplicitProviderModelId(providerModelDraft);
+                  const targetProvider = providerForExplicitModelId(normalizedDraft);
+                  if (targetProvider && targetProvider !== onlineConfigProvider && !selectedOnlineProvider.custom) {
+                    addOrUpdateProviderModel();
+                    return;
+                  }
+                  const draftModel = normalizedDraft
+                    ? selectedOnlineProviderModels.find((model) => model.id === normalizedDraft) || classifyProviderModel(normalizedDraft)
+                    : null;
+                  const detectedModels = draftModel
+                    ? [...(selectedOnlineProvider.detectedModels || []).filter((model) => model.id !== normalizedDraft), draftModel]
+                    : selectedOnlineProvider.detectedModels || [];
+                  const normalizedModel = normalizeExplicitProviderModelId(selectedOnlineProvider.model || normalizedDraft);
+                  const providerConfig = {
+                    ...selectedOnlineProvider,
+                    model: normalizedModel,
+                    detectedModels,
+                    capabilities: [...new Set(detectedModels.flatMap(capabilitiesForModel))],
+                  } as OnlineProviderConfig;
+                  const next = { ...onlineProviderConfigs, [onlineConfigProvider]: providerConfig };
+                  setOnlineProviderConfigs(next);
+                  localStorage.setItem(ONLINE_PROVIDER_STORE, JSON.stringify(next));
+                  setMessage(normalizedModel !== selectedOnlineProvider.model
+                    ? `${onlineConfigProvider} 已保存；模型名称已按可灵 API 纠正为 ${normalizedModel}`
+                    : `${onlineConfigProvider} 已保存：1 套平台密钥，${providerConfig.detectedModels?.length || 0} 个模型供全部节点共用`);
+                  setOnlineApiOpen(false);
+                }}>保存本机配置</button>
               </footer>
             </> : <>
-              <div className={`cloud-config-status ${cloudConfigured ? "configured" : ""}`}>
-                {cloudConfigured ? "云端地址与登录令牌已保存，等待服务器验证" : "未配置云端服务"}
+              <div className="mcp-config-layout">
+                <aside><button className="mcp-add" onClick={addMcpServer}>＋ 添加 MCP 服务</button>{mcpServers.map((server) => <button className={activeMcpConfig?.id === server.id ? "active" : ""} key={server.id} onClick={() => setActiveMcpServer(server.id)}><b>{server.name}</b><small>{server.lastStatus || "尚未测试"}</small></button>)}</aside>
+                <main>{activeMcpConfig ? <>
+                  <label>服务名称<input value={activeMcpConfig.name} onChange={(event) => updateMcpServer(activeMcpConfig.id, { name: event.target.value })} /></label>
+                  <label>Streamable HTTP 地址<input value={activeMcpConfig.endpoint} onChange={(event) => updateMcpServer(activeMcpConfig.id, { endpoint: event.target.value })} placeholder="https://example.com/mcp" /></label>
+                  <label>Bearer Token（可选）<input type="password" value={activeMcpConfig.token} onChange={(event) => updateMcpServer(activeMcpConfig.id, { token: event.target.value })} /></label>
+                  <label className="mcp-enabled"><input type="checkbox" checked={activeMcpConfig.enabled} onChange={(event) => updateMcpServer(activeMcpConfig.id, { enabled: event.target.checked })} />允许工作流使用此服务</label>
+                  <div className="mcp-tools"><header><b>已发现工具</b><span>{activeMcpConfig.tools.length}</span></header>{activeMcpConfig.tools.length ? activeMcpConfig.tools.map((tool) => <div key={tool.name}><b>{tool.name}</b><small>{tool.description || "无说明"}</small></div>) : <p>测试连接后会从 tools/list 读取工具，不会伪造工具名称。</p>}</div>
+                  <footer><button className="danger" onClick={() => { setMcpServers((current) => current.filter((server) => server.id !== activeMcpConfig.id)); setActiveMcpServer(null); }}>删除</button><button className="primary" disabled={testingMcp} onClick={() => void testMcpServer(activeMcpConfig)}>{testingMcp ? "正在读取工具…" : "测试连接并读取工具"}</button></footer>
+                </> : <div className="mcp-empty"><b>还没有 MCP 服务</b><small>添加后可测试连接并读取服务实际公开的工具。</small><button onClick={addMcpServer}>添加第一个 MCP 服务</button></div>}</main>
               </div>
-              <label>服务地址
-                <input value={cloudSettings.endpoint} onChange={(event) => setCloudSettings((value) => ({ ...value, endpoint: event.target.value }))} placeholder="https://api.yimu.example" />
-              </label>
-              <label>登录令牌
-                <input type="password" value={cloudSettings.accessToken} onChange={(event) => setCloudSettings((value) => ({ ...value, accessToken: event.target.value }))} placeholder="登录后由亿幕云端签发" />
-              </label>
-              <label>账户备注
-                <input value={cloudSettings.accountLabel} onChange={(event) => setCloudSettings((value) => ({ ...value, accountLabel: event.target.value }))} placeholder="例如：湫的云端账户" />
-              </label>
-              <small className="online-provider-note">积分、支付、余额和任务队列必须由亿幕云端服务器返回。当前未部署服务器时，应用不会展示伪余额、扣费或提交任务。</small>
-              <footer>
-                <button onClick={() => { setOnlineApiOpen(false); setCloudPointsOpen(true); }}>查看积分中心演示</button>
-                <button className="primary" onClick={() => { localStorage.setItem(CLOUD_STORE, JSON.stringify(cloudSettings)); if (!cloudConfigured) { setMessage("请填写云端服务地址和登录令牌"); return; } setMessage("亿幕云端配置已保存，等待服务器验证"); setOnlineApiOpen(false); }}>保存云端配置</button>
-              </footer>
             </>}
           </section>
         </div>
@@ -2671,6 +4973,7 @@ setPanning(false);
             <dl>
               <div><dt>滚轮</dt><dd>以鼠标位置为中心缩放画布</dd></div>
               <div><dt>左键空白处拖动</dt><dd>移动画布视角</dd></div>
+              <div><dt>按住中键拖动</dt><dd>框选节点与连接线</dd></div>
               <div><dt>Ctrl + 拖动</dt><dd>矩形框选节点</dd></div>
               <div><dt>Ctrl + Alt + 拖动</dt><dd>框选连接线；选中后可批量断开</dd></div>
               <div><dt>Ctrl + A</dt><dd>选中全部节点</dd></div>
@@ -2693,7 +4996,7 @@ setPanning(false);
           <span className="brand-mark">✦</span>
           <div>
             <b>创作工作台</b>
-            <small>本地项目 · 自动保存</small>
+            <small>本地项目 · 每 10 分钟自动保存</small>
           </div>
           <button className="director-mode-button" onClick={openDirectorMode} title="打开导演台">导演模式</button>
         </div>
@@ -2763,62 +5066,6 @@ setPanning(false);
               音频素材<small>配音、音乐与音效</small>
             </span>
           </button>
-          <p>03　模型生成</p>
-          <button
-            className="side-action ai-text"
-            onClick={() => addAtViewport("aiText", {
-              name: "AI 剧本生成",
-              workflow: {
-                source: "byok", provider: "OpenAI", model: "gpt-4.1-mini",
-                genre: "剧情短片", format: "标准影视剧本", length: "中篇",
-                tone: "电影感", audience: "大众", language: "简体中文",
-                creativity: 0.8, episodeCount: 1, episodeMinutes: 5,
-                includeStoryboard: true, includeCharacters: true,
-              } satisfies AiTextSettings,
-            })}
-          >
-            <b>文</b>
-            <span>
-              AI 剧本生成<small>一句创意扩写完整剧本</small>
-            </span>
-          </button>
-          <button
-            className="side-action ai-image"
-            onClick={() => addAtViewport("aiImage", {
-              name: "AI 图片生成",
-              workflow: {
-                source: "byok", provider: "OpenAI", model: "gpt-image-1",
-                mode: "text", ratio: "16:9", resolution: "1024",
-                amount: 1, style: "电影写实", seed: -1, guidance: 7,
-              } satisfies AiImageSettings,
-            })}
-          >
-            <b>图</b>
-            <span>
-              AI 图片生成<small>文生图与多图参考</small>
-            </span>
-          </button>
-          <button
-            className="side-action online-video"
-            onClick={() => addAtViewport("onlineVideo", {
-              name: "AI 视频生成",
-              workflow: {
-                source: "byok",
-                provider: "未选择平台",
-                mode: "text",
-                ratio: "16:9",
-                quality: "720P",
-                duration: 5,
-                amount: 1,
-                audio: true,
-              } satisfies OnlineVideoSettings,
-            })}
-          >
-            <b>✦</b>
-            <span>
-              AI 视频生成<small>文生、图生、首尾帧视频</small>
-            </span>
-          </button>
           <button
             className="side-action workflow"
             onClick={() => setWorkflowLibraryOpen(true)}
@@ -2831,12 +5078,19 @@ setPanning(false);
           <div className="online-api-picker">
             <button
               className="side-action online-api"
-              onClick={() => openOnlineConfiguration("byok")}
+              onClick={() => {
+                const activeVideoProvider = ((activeOnlineVideoNode?.workflow || {}) as OnlineVideoSettings).provider;
+                setServiceConfigSection("models");
+                openOnlineConfiguration("byok", activeVideoProvider && activeVideoProvider !== "未选择平台" ? activeVideoProvider : undefined);
+              }}
             >
               <b>◌</b>
               <span>
-                在线服务配置<small>自带密钥与亿幕云端</small>
+                模型 API 配置<small>按文本、图片、视频管理平台</small>
               </span>
+            </button>
+            <button className="side-action online-api" onClick={() => { setServiceConfigSection("mcp"); openOnlineConfiguration("byok"); }}>
+              <b>⌘</b><span>MCP 工具配置<small>连接服务并读取可用工具</small></span>
             </button>
           </div>
         </section>
@@ -2945,11 +5199,13 @@ setPanning(false);
       <section
         ref={canvasRef}
         className="canvas"
-        style={{ cursor: panning ? "grabbing" : "grab" }}
+        style={{ cursor: selectionBox ? "crosshair" : panning ? "grabbing" : "grab" }}
         onWheel={wheel}
-        onPointerDown={canvasDown}
+        onPointerDownCapture={(event) => { if (event.button === 1) canvasDown(event); }}
+        onPointerDown={(event) => { if (event.button !== 1) canvasDown(event); }}
         onPointerMove={canvasMove}
         onPointerUp={canvasUp}
+        onAuxClick={(event) => { if (event.button === 1) event.preventDefault(); }}
         onContextMenu={canvasMenu}
         onDragOver={(event) => event.preventDefault()}
         onDrop={canvasDrop}
@@ -3015,14 +5271,14 @@ setPanning(false);
                 const maxX = g.bounds.x + g.bounds.w;
                 const maxY = g.bounds.y + g.bounds.h;
                 const gnds = Object.fromEntries(project.nodes.filter((x) => g.nodeIds.includes(x.id)).map((x) => [x.id, { x: x.x, y: x.y }]));
-                return <div key={g.id} className="node-group" style={{ position: "absolute", left: minX, top: minY, width: maxX - minX, height: maxY - minY }} onPointerDown={(e) => { if (e.button !== 0) return; moving.current = { startX: e.clientX, startY: e.clientY, nodes: gnds, isGroupDrag: g.id, startBounds: { x: g.bounds.x, y: g.bounds.y, w: g.bounds.w, h: g.bounds.h } } as any; }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenu({ x: e.clientX, y: e.clientY, node: "__group_" + g.id }); }}><span className="node-group-name" title="双击重新命名" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => { e.stopPropagation(); setGroupNameInput(g.id); }}>{g.name}</span></div>;
+                return <div key={g.id} className="node-group" style={{ position: "absolute", left: minX, top: minY, width: maxX - minX, height: maxY - minY }} onPointerDown={(e) => { if (e.button !== 0) return; moving.current = { startX: e.clientX, startY: e.clientY, nodes: gnds, isGroupDrag: g.id, startBounds: { x: g.bounds.x, y: g.bounds.y, w: g.bounds.w, h: g.bounds.h }, startProject: project }; }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenu({ x: e.clientX, y: e.clientY, node: "__group_" + g.id }); }}><span className="node-group-name" title="双击重新命名" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => { e.stopPropagation(); setGroupNameInput(g.id); }}>{g.name}</span></div>;
               })}
           {project.nodes.map((n) => (
             <article
               key={n.id}
               data-node-id={n.id}
-              className={`node ${n.kind} status-${n.status || "idle"} ${selected.includes(n.id) ? "selected" : ""} ${dropTextTarget === n.id ? "drop-target" : ""}`}
-              style={{ left: n.x, top: n.y, width: n.width, height: n.height }}
+              className={`node ${n.kind} status-${n.status || "idle"} ${n.validationErrors?.length ? "validation-error" : ""} ${selected.includes(n.id) ? "selected" : ""} ${dropTextTarget === n.id ? "drop-target" : ""} ${n.locked ? "locked" : ""} ${n.mirrored ? "mirrored" : ""}`}
+              style={{ left: n.x, top: n.y, width: n.width, height: n.height, transform: n.kind === "annotation" || n.kind === "annotationPointer" ? `rotate(${n.rotation || 0}deg)` : undefined }}
               onPointerDown={(e) => nodeDown(e, n)}
               onContextMenu={(e) => nodeMenu(e, n.id)}
               onDragOver={
@@ -3037,7 +5293,7 @@ setPanning(false);
                 n.kind === "text" ? (event) => textDrop(event, n) : undefined
               }
             >
-              {n.kind !== "api" && (
+              {n.kind !== "api" && n.kind !== "annotation" && n.kind !== "annotationPointer" && (
                 <div className="node-head">
                   <span>{typeLabel[n.kind]}</span>
                   <em>{n.kind === "text" ? "文本/提示词" : n.name}</em>
@@ -3048,6 +5304,12 @@ setPanning(false);
                   )}
                 </div>
               )}
+              {n.status === "running" && (n.kind === "image" || n.kind === "text" || n.kind === "video") && (
+                <div className="node-generation-progress" aria-label="AI 生成中">
+                  <i>生成</i><span>处理中</span>
+                </div>
+              )}
+              {n.kind !== "annotation" && n.kind !== "annotationPointer" && <>
               <span
                 className="port in"
                 style={{ ...portStyle, left: -(portWorldSize / 2 + 1) }}
@@ -3063,15 +5325,9 @@ setPanning(false);
                   const from = linking.current?.from;
                   if (from && from !== n.id) {
                     const side = linking.current?.side || "out";
-                    change((p) => ({
-                      ...p,
-                      links: [
-                        ...p.links.filter(
-                          (l) => !(l.from === (side === "out" ? from : n.id) && l.to === (side === "out" ? n.id : from)),
-                        ),
-                        side === "out" ? { id: newId(), from, to: n.id } : { id: newId(), from: n.id, to: from },
-                      ],
-                    }));
+                    const source = side === "out" ? from : n.id;
+                    const target = side === "out" ? n.id : from;
+                    connectCanvasNodes(source, target);
                     linking.current = null;
                     setDraftLink(null);
                   } else {
@@ -3107,14 +5363,23 @@ setPanning(false);
                   if (!active || active.from === n.id) return;
                   const from = active.side === "in" ? n.id : active.from;
                   const to = active.side === "in" ? active.from : n.id;
-                  change((p) => ({
-                    ...p,
-                    links: [...p.links.filter((link) => !(link.from === from && link.to === to)), { id: newId(), from, to }],
-                  }));
+                  connectCanvasNodes(from, to);
                   linking.current = null;
                   setDraftLink(null);
                 }}
               />
+              </>}
+              {n.kind !== "api" && n.kind !== "annotation" && n.kind !== "annotationPointer" && n.validationErrors?.length ? (
+                <button
+                  type="button"
+                  className="node-validation-badge"
+                  title={n.validationErrors.join("\n")}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={() => setMessage(n.validationErrors?.join("；") || "运行前检查发现问题")}
+                >
+                  ⚠ {n.validationErrors.length} 项待修复
+                </button>
+              ) : null}
               {n.kind === "image" &&
                 (n.src ? (
                   <img
@@ -3145,25 +5410,30 @@ setPanning(false);
                     }}
                   />
                 ) : (
-                  <div className="empty">
+                  <div className="empty node-inline-actions">
                     <button
-                      style={{
-                        border: "1px solid #536466",
-                        background: "#293235",
-                        color: "#dce8e7",
-                        padding: "9px 14px",
-                      }}
+                      className="node-add-primary"
                       onPointerDown={(e) => e.stopPropagation()}
                       onClick={() => openFile("image", n.id)}
                     >
                       ＋ 添加图片
                     </button>
+                    <button className="node-add-ai" onPointerDown={(e) => e.stopPropagation()} onClick={() => {
+                      const connection = imageProviderOptions[0];
+                      change((p) => ({ ...p, nodes: p.nodes.map((node) => node.id === n.id ? { ...node, workflow: node.workflow || { source: "byok", provider: connection?.name || "OpenAI", model: connection?.defaultModel || "gpt-image-1", mode: "text", ratio: "1:1", resolution: "1024", amount: 1, quality: "low", style: "电影写实", seed: -1, guidance: 7 } satisfies AiImageSettings } : node) }));
+                      setActiveText(null); setActiveStoryboard(null); setActiveOnlineVideo(null); setActiveAiNode(n.id);
+                    }}>✦ AI 图片生成</button>
                   </div>
                 ))}
               {n.kind === "video" &&
                 (n.src ? (
                   <VideoCanvas
-                    src={n.src}
+                    src={managedPreviewSrc(n.localPath) || n.src}
+                    fallbackSrc={managedPreviewSrc(n.localPath)
+                      ? (n.fallbackSrc || n.src)
+                      : (n.fallbackSrc || (/^(?:LTX2|LTX)/i.test(n.fileName || n.name)
+                        ? `${apiUrl.replace(/\/$/, "")}/view?filename=${encodeURIComponent(n.fileName || n.name)}&subfolder=LTX2&type=output`
+                        : undefined))}
                     onMetadata={(width, height) =>
                       recordMediaSize(
                         n.id,
@@ -3171,21 +5441,31 @@ setPanning(false);
                         height,
                       )
                     }
+                    onPlaybackError={() => {
+                      const recoverySource = n.fallbackSrc
+                        || (parseComfyViewSource(n.src) ? n.src : undefined)
+                        || (/^(?:LTX2|LTX)/i.test(n.fileName || n.name)
+                          ? `${apiUrl.replace(/\/$/, "")}/view?filename=${encodeURIComponent(n.fileName || n.name)}&subfolder=LTX2&type=output`
+                          : undefined);
+                      void recoverComfyVideoPreview(n, recoverySource);
+                    }}
                   />
                 ) : (
-                  <div className="empty">
+                  <div className="empty node-inline-actions">
                     <button
-                      style={{
-                        border: "1px solid #536466",
-                        background: "#293235",
-                        color: "#dce8e7",
-                        padding: "9px 14px",
-                      }}
+                      className="node-add-primary"
                       onPointerDown={(e) => e.stopPropagation()}
                       onClick={() => openFile("video", n.id)}
                     >
                       ＋ 添加视频
                     </button>
+                    <button className="node-add-ai" onPointerDown={(e) => e.stopPropagation()} onClick={() => {
+                      const provider = onlineVideoProviderNames[0] || "未选择平台";
+                      const model = modelsForProvider(provider, "video")[0] || resolvedProviderConfig(provider)?.model || "";
+                      const capabilities = videoCapabilitiesFor(provider, model);
+                      change((p) => ({ ...p, nodes: p.nodes.map((node) => node.id === n.id ? { ...node, workflow: node.workflow || { source: "byok", provider, model, mode: capabilities.modes[0], ratio: "16:9", quality: "720P", duration: 5, amount: 1, audio: true } satisfies OnlineVideoSettings } : node) }));
+                      setActiveText(null); setActiveStoryboard(null); setActiveAiNode(null); setActiveOnlineVideo(n.id);
+                    }}>✦ AI 视频生成</button>
                   </div>
                 ))}
               {n.kind === "audio" &&
@@ -3207,6 +5487,45 @@ setPanning(false);
                     </button>
                   </div>
                 ))}
+              {n.kind === "annotation" && <div className="annotation-node">
+                {editingAnnotation === n.id ? (
+                  <textarea
+                    autoFocus
+                    value={n.text ?? "情绪转折点。\n冷静的表象下是汹涌的告别。"}
+                    style={{ fontSize: n.fontSize ?? 19 }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onChange={(event) => change((p) => ({ ...p, nodes: p.nodes.map((x) => {
+                      if (x.id !== n.id) return x;
+                      const text = event.target.value;
+                      const { width, height } = annotationMetrics(text, x.width, x.fontSize ?? 19);
+                      return { ...x, text, width, height };
+                    }) }))}
+                    onBlur={() => setEditingAnnotation(null)}
+                    onKeyDown={(event) => { if (event.key === "Escape") setEditingAnnotation(null); }}
+                    aria-label="镜头批注内容"
+                  />
+                ) : (
+                  <div className="annotation-text" style={{ fontSize: n.fontSize ?? 19 }} title="双击修改批注" onClick={(event) => { if (event.detail === 2) { event.stopPropagation(); setEditingAnnotation(n.id); } }} onDoubleClick={(event) => { event.stopPropagation(); setEditingAnnotation(n.id); }}>
+                    {n.text ?? "情绪转折点。\n冷静的表象下是汹涌的告别。"}
+                  </div>
+                )}
+                <div className="annotation-tools" onPointerDown={(event) => event.stopPropagation()}>
+                  <button title="修改批注文字" onClick={() => setEditingAnnotation(n.id)}>编辑</button>
+                  <button className={n.locked ? "active" : ""} title={n.locked ? "解除固定" : "固定位置"} onClick={() => change((p) => ({ ...p, nodes: p.nodes.map((x) => x.id === n.id ? { ...x, locked: !x.locked } : x) }))}>{n.locked ? "解锁" : "固定"}</button>
+                </div>
+              </div>}
+              {n.kind === "annotationPointer" && <div className="annotation-pointer-node">
+                <svg viewBox="0 0 54 58" aria-hidden="true">
+                  <g transform={n.mirrored ? "translate(54 0) scale(-1 1)" : undefined}>
+                    <path d="M16 6 C 13 20, 10 37, 20 47 C 28 54, 38 50, 42 42" />
+                    <path d="M34 42 L42 42 L40 50" />
+                  </g>
+                </svg>
+                <div className="annotation-tools" onPointerDown={(event) => event.stopPropagation()}>
+                  <button className={n.mirrored ? "active" : ""} title="镜像指向箭头" onClick={() => change((p) => ({ ...p, nodes: p.nodes.map((x) => x.id === n.id ? { ...x, mirrored: !x.mirrored } : x) }))}>镜像</button>
+                  <button className={n.locked ? "active" : ""} title={n.locked ? "解除固定" : "固定位置"} onClick={() => change((p) => ({ ...p, nodes: p.nodes.map((x) => x.id === n.id ? { ...x, locked: !x.locked } : x) }))}>{n.locked ? "解锁" : "固定"}</button>
+                </div>
+              </div>}
               {(n.kind === "aiText" || n.kind === "aiImage") && (
                 <AiGenerationNodeView
                   node={n as NodeItem & { kind: "aiText" | "aiImage" }}
@@ -3230,6 +5549,21 @@ setPanning(false);
                   audio: true,
                   ...((n.workflow || {}) as OnlineVideoSettings),
                 };
+                const nodeProviderConfig = onlineProviderConfigs[config.provider || ""]
+                  ? { ...ONLINE_PROVIDER_DEFAULTS[config.provider || ""], ...onlineProviderConfigs[config.provider || ""] }
+                  : ONLINE_PROVIDER_DEFAULTS[config.provider || ""];
+                const nodeModel = compatibleModelForProvider(
+                  config.provider || "",
+                  "video",
+                  config.modelPinned ? config.model : nodeProviderConfig?.model,
+                  config.model,
+                );
+                const nodeCapabilities = videoCapabilitiesFor(config.provider || "", nodeModel);
+                const normalizedNodeOptions = normalizeVideoGenerationOptions(nodeCapabilities, {
+                  mode: config.mode,
+                  amount: config.amount,
+                });
+                const nodeSupportsAudio = supportsVideoAudio(nodeCapabilities, normalizedNodeOptions.mode);
                 const update = (patch: Partial<OnlineVideoSettings>) => change((p) => ({
                   ...p,
                   nodes: p.nodes.map((x) => x.id === n.id ? { ...x, workflow: { ...config, ...patch } } : x),
@@ -3248,11 +5582,13 @@ setPanning(false);
                     }}
                     title="AI 视频生成 · 点击配置"
                   >
-                    <div className="ai-generation-node-empty">
-                      <span>✦</span>
-                      <b>AI 视频生成</b>
-                      <small>支持文生、图生与首尾帧视频</small>
-                    </div>
+                      <div className="ai-generation-node-empty">
+                        <span>✦</span>
+                        <b>AI 视频生成</b>
+                        <small>{onlineVideoProviderNames.length
+                          ? `${config.provider === "未选择平台" ? "选择已保存的平台" : `${config.provider} · ${nodeModel || "没有匹配的视频模型"}`} · ${nodeModel ? nodeCapabilities.modes.map(videoModeLabel).join("、") : "请到配置台指定视频能力"}`
+                          : "先保存视频 API 配置，再直接选择模型生成"}</small>
+                      </div>
                   </button>
                   <div className="online-video-body" onPointerDown={(event) => event.stopPropagation()}>
                   <div className="online-video-topline">
@@ -3262,14 +5598,16 @@ setPanning(false);
                       const saved = onlineProviderConfigs[provider];
                       const defaults = ONLINE_PROVIDER_DEFAULTS[provider];
                       const providerConfig = saved ? { ...defaults, ...saved } : defaults;
-                      const model = (providerConfig?.detectedModels || []).find((item) => item.kind === "video");
-                      update({ provider, model: providerConfig?.model, ...(model?.modes?.length ? { mode: model.modes[0] } : {}) });
+                      const model = compatibleModelForProvider(provider, "video", providerConfig?.model);
+                      const nextCapabilities = videoCapabilitiesFor(provider, model);
+                      const nextOptions = normalizeVideoGenerationOptions(nextCapabilities, { mode: config.mode, amount: config.amount });
+                      update({ provider, model, modelPinned: false, mode: nextOptions.mode, amount: nextOptions.amount });
                     }}>
                       <option>未选择平台</option>
                       {onlineVideoProviderNames.map((provider) => <option key={provider}>{provider}</option>)}
                     </select>
-                    <select value={config.mode} onChange={(event) => update({ mode: event.target.value as OnlineVideoSettings["mode"] })}>
-                      {Object.entries(modeLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                    <select value={normalizedNodeOptions.mode} onChange={(event) => update({ mode: event.target.value as OnlineVideoSettings["mode"] })}>
+                      {nodeCapabilities.modes.map((mode) => <option value={mode} key={mode}>{modeLabels[mode]}</option>)}
                     </select>
                   </div>
                   <textarea value={config.prompt || ""} onChange={(event) => update({ prompt: event.target.value })} placeholder="描述你想要生成的视频画面；可连接文本、图片或首尾帧作为参考…" />
@@ -3279,11 +5617,11 @@ setPanning(false);
                     <label>比例<select value={config.ratio} onChange={(event) => update({ ratio: event.target.value })}>{["Auto", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"].map((item) => <option key={item}>{item}</option>)}</select></label>
                     <label>清晰度<select value={config.quality} onChange={(event) => update({ quality: event.target.value })}>{["480P", "720P", "1080P"].map((item) => <option key={item}>{item}</option>)}</select></label>
                     <label>时长<select value={config.duration} onChange={(event) => update({ duration: Number(event.target.value) })}>{[5, 6, 8, 10].map((item) => <option value={item} key={item}>{item} 秒</option>)}</select></label>
-                    <label>数量<select value={config.amount} onChange={(event) => update({ amount: Number(event.target.value) })}>{[1, 2, 4].map((item) => <option value={item} key={item}>{item} 个</option>)}</select></label>
-                    <button className={config.audio ? "active" : ""} onClick={() => update({ audio: !config.audio })}>🔊 音频</button>
+                    <label>数量<select value={normalizedNodeOptions.amount} onChange={(event) => update({ amount: Number(event.target.value) })}>{nodeCapabilities.amounts.map((item) => <option value={item} key={item}>{item} 个</option>)}</select></label>
+                    <button disabled={!nodeSupportsAudio} title={nodeSupportsAudio ? "生成音频" : "当前模型没有原生音频合同"} className={config.audio && nodeSupportsAudio ? "active" : ""} onClick={() => update({ audio: !config.audio })}>{nodeSupportsAudio ? "🔊 音频" : "🔇 无原生音频"}</button>
                   </div>
                   <div className="online-video-footer">
-                    <small>{modeLabels[config.mode || "text"]} · {config.ratio} · {config.quality} · {config.duration}s · {config.amount}个</small>
+                    <small>{modeLabels[normalizedNodeOptions.mode]} · {config.ratio} · {config.quality} · {config.duration}s · {normalizedNodeOptions.amount}个</small>
                     <button onClick={() => setMessage(config.provider === "未选择平台" ? "请先选择在线平台并配置 API 密钥" : `“${config.provider}”节点已准备好，平台接入后即可运行`)}>生成视频 ↑</button>
                   </div>
                   </div>
@@ -3339,11 +5677,17 @@ setPanning(false);
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={() => {
                       setActiveStoryboard(null);
+                      setActiveAiNode(null);
+                      setActiveOnlineVideo(null);
                       setActiveText(n.id);
                     }}
                   >
                     {n.text || "点击输入文本"}
                   </button>
+                  {!n.text && <div className="text-ai-actions" onPointerDown={(event) => event.stopPropagation()}>
+                    <button className="text-add-ai" onClick={() => openTextAiComposer(n.id, "script")}>✦ AI 剧本生成</button>
+                    <button className="text-add-ai storyboard" onClick={() => openTextAiComposer(n.id, "storyboardFrames")}>▦ AI 分镜画面</button>
+                  </div>}
                   {false && activeText === n.id && (
                     <div
                       className="text-editor"
@@ -3482,8 +5826,11 @@ setPanning(false);
                   <small>点击编辑分镜表</small>
                 </button>
               )}
-              {n.kind === "api" && (
-                <>
+              {n.kind === "api" && (() => {
+                const nodeDiagnostics = n.onlineProvider ? [] : comfyDiagnostics[n.id] || [];
+                const nodeErrors = nodeDiagnostics.filter((diagnostic) => diagnostic.level === "error");
+                const diagnosticsOpen = expandedComfyDiagnostics === n.id;
+                return <>
                   {!n.onlineProvider && <button className="api-config-toggle comfy" onPointerDown={(event) => event.stopPropagation()} onClick={() => openComfyNodeParameters(n)}>参数</button>}
                   {n.onlineProvider && <>
                     <i className={`api-config-dot ${((n.workflow as { endpoint?: string; apiKey?: string; model?: string } | undefined)?.endpoint && (n.workflow as { endpoint?: string; apiKey?: string; model?: string } | undefined)?.apiKey && (n.workflow as { endpoint?: string; apiKey?: string; model?: string } | undefined)?.model) ? "ready" : ""}`} />
@@ -3523,6 +5870,44 @@ setPanning(false);
                       个输入
                     </span>
                   </div>
+                  {!n.onlineProvider && nodeDiagnostics.length ? (
+                    <div className="comfy-diagnostic-control" onPointerDown={(event) => event.stopPropagation()}>
+                      <button
+                        className={nodeErrors.length ? "has-errors" : "has-notes"}
+                        title={nodeErrors.length ? `发现 ${nodeErrors.length} 项 ComfyUI 预检错误，点击查看节点、插槽和修复方式` : "查看本次 ComfyUI 自动适配记录"}
+                        aria-expanded={diagnosticsOpen}
+                        onClick={() => setExpandedComfyDiagnostics(diagnosticsOpen ? null : n.id)}
+                      >
+                        {nodeErrors.length ? `⚠ ${nodeErrors.length} 项` : `ⓘ ${nodeDiagnostics.length} 项`}
+                      </button>
+                      {diagnosticsOpen && (
+                        <section className="comfy-diagnostic-popover" role="status" aria-label="ComfyUI 工作流诊断">
+                          <header>
+                            <span>COMFYUI 运行前检查</span>
+                            <button title="收起诊断" onClick={() => setExpandedComfyDiagnostics(null)}>×</button>
+                          </header>
+                          <p className="comfy-diagnostic-intro">已按当前 ComfyUI 的 object_info 检查；不会把旧节点 ID 或节点名称猜测为正确连线。</p>
+                          <div className="comfy-diagnostic-list">
+                            {nodeDiagnostics.map((diagnostic, index) => {
+                              const location = comfyDiagnosticLocation(diagnostic);
+                              const type = diagnostic.expectedType || diagnostic.actualType;
+                              return <article key={`${n.id}-${diagnostic.code || "diagnostic"}-${index}`} className={diagnostic.level}>
+                                <header><b>{diagnostic.level === "error" ? "错误" : diagnostic.level === "warning" ? "注意" : "已适配"} · {comfyDiagnosticTitle(diagnostic)}</b>{diagnostic.code && <code>{diagnostic.code}</code>}</header>
+                                {location && <span className="comfy-diagnostic-location">{location}</span>}
+                                {type && <span className="comfy-diagnostic-types">期望 {diagnostic.expectedType || "—"} · 实际 {diagnostic.actualType || "—"}</span>}
+                                <p>{diagnostic.message}</p>
+                                <small>如何修复：{comfyDiagnosticRepair(diagnostic)}</small>
+                              </article>;
+                            })}
+                          </div>
+                          <footer>
+                            <button onClick={() => { setLogsOpen(true); nodeErrors.forEach((diagnostic) => addLog(`ComfyUI 连线校验：${comfyDiagnosticSummary(diagnostic)}`)); }}>写入运行日志</button>
+                            <button className="primary" disabled={n.status === "running" || n.status === "stopping"} onClick={() => void run(n.id)}>{n.status === "running" ? "正在运行" : "重试校验"}</button>
+                          </footer>
+                        </section>
+                      )}
+                    </div>
+                  ) : n.validationErrors?.length ? <div className="workflow-validation" title={n.validationErrors.join("\n")}>{n.validationErrors.slice(0, 2).map((error, index) => <span key={`${n.id}-validation-${index}`}>⚠ {error}</span>)}</div> : null}
                   <small
                     title={n.name}
                     style={{
@@ -3540,14 +5925,15 @@ setPanning(false);
                   >
                     {n.name}
                   </small>
-                </>
-              )}
+                </>;
+              })()}
               {n.kind !== "api" && n.kind !== "audio" && (
                 <span
                   className="resize"
                   onPointerDown={(e) => resize(e, n.id)}
                 />
               )}
+              {(n.kind === "annotation" || n.kind === "annotationPointer") && !n.locked && <span className="rotate" title="按住拖动，自由旋转" onPointerDown={(e) => rotateAnnotation(e, n.id)}>转</span>}
             </article>
           ))}
         </div>
@@ -3607,6 +5993,9 @@ setPanning(false);
             </div>
           )}
         </div>
+        <div className="canvas-live-status" aria-live="polite" title={message}>
+          <span>{message}</span>
+        </div>
       </section>
       {previewImage?.src && (
         <div className="media-lightbox" onClick={() => setPreviewImage(null)}>
@@ -3622,6 +6011,7 @@ setPanning(false);
           source: "byok", provider: "未选择平台", mode: "text", ratio: "16:9", quality: "720P", duration: 5, amount: 1, audio: true,
           ...((activeOnlineVideoNode.workflow || {}) as OnlineVideoSettings),
         };
+        const source: GenerationSource = config.source || "byok";
         const update = (patch: Partial<OnlineVideoSettings>) => change((p) => ({
           ...p,
           nodes: p.nodes.map((node) => node.id === activeOnlineVideoNode.id ? { ...node, workflow: { ...config, ...patch } } : node),
@@ -3650,16 +6040,52 @@ setPanning(false);
         const activeByokProvider = savedByokProvider
           ? { ...defaultByokProvider, ...savedByokProvider }
           : defaultByokProvider ? { ...defaultByokProvider, apiKey: "" } : undefined;
-        const detectedByokModels = (activeByokProvider?.detectedModels || []).filter((model) => model.kind === "video");
-        const customByokModel = activeByokProvider?.model && !detectedByokModels.some((model) => model.id === activeByokProvider.model)
-          ? { ...classifyProviderModel(activeByokProvider.model), modes: detectedByokModels[0]?.modes || classifyProviderModel(activeByokProvider.model).modes }
-          : undefined;
-        const byokModels = customByokModel ? [customByokModel, ...detectedByokModels] : detectedByokModels;
-        const byokModel = byokModels.find((model) => model.id === config.model) || byokModels[0];
+        const allByokModels = activeByokProvider?.detectedModels || [];
+        const byokModels = modelsForProvider(config.provider || "", "video").map((id) => {
+          const detected = allByokModels.find((model) => model.id === id) || classifyProviderModel(id);
+          const modes = [...videoCapabilitiesFor(config.provider || "", id).modes];
+          return {
+            ...detected,
+            kind: "video" as const,
+            modes,
+            purpose: `视频 · ${modes.map(videoModeLabel).join(" / ")}`,
+          };
+        });
+        const selectedByokModelId = compatibleModelForProvider(
+          config.provider || "",
+          "video",
+          config.modelPinned ? config.model : activeByokProvider?.model,
+          config.model,
+        );
+        const byokModel = byokModels.find((model) => model.id === selectedByokModelId);
+        const hasCompatibleByokVideoModel = Boolean(selectedByokModelId && byokModel);
+        const byokVideoCapabilities = videoCapabilitiesFor(config.provider || "", selectedByokModelId);
+        const normalizedByokVideoOptions = normalizeVideoGenerationOptions(byokVideoCapabilities, {
+          mode: config.mode,
+          amount: config.amount,
+        });
+        const byokSelectableModes: readonly VideoGenerationMode[] = byokModels.length
+          ? [...new Set(byokModels.flatMap((model) => videoCapabilitiesFor(config.provider || "", model.id).modes))]
+          : ["text"];
+        const selectableVideoModes: readonly VideoGenerationMode[] = source === "byok"
+          ? byokSelectableModes
+          : source === "cloud"
+            ? cloudModel?.videoModes || ["text"]
+            : ["text"];
+        const selectableVideoAmounts = source === "byok" ? byokVideoCapabilities.amounts : [1];
+        const displayedVideoMode = source === "byok" ? normalizedByokVideoOptions.mode : (config.mode || "text") as VideoGenerationMode;
+        const displayedVideoAmount = source === "byok" ? normalizedByokVideoOptions.amount : 1;
+        const byokSupportsAudio = supportsVideoAudio(byokVideoCapabilities, displayedVideoMode);
+        const displayedVideoAudio = source === "byok" ? byokSupportsAudio && config.audio !== false : config.audio !== false;
+        const displayedByokInputLimit = videoInputLimitForMode(byokVideoCapabilities, displayedVideoMode);
+        const connectedImageReferenceCount = references.filter((item) => item.kind === "image" && Boolean(item.src)).length;
+        const referenceAddDisabled = source === "byok" && (
+          displayedByokInputLimit.maximum === 0 || connectedImageReferenceCount >= displayedByokInputLimit.maximum
+        );
         const cloudEstimate = config.source === "cloud" ? estimateCloudPoints("video", cloudModel?.id, {
           promptLength: (config.prompt || "").length + linkedTextInputs.join("\n").length,
           references: references.length,
-          amount: config.amount,
+          amount: displayedVideoAmount,
           resolution: config.quality,
           duration: config.duration,
           audio: config.audio,
@@ -3673,7 +6099,34 @@ setPanning(false);
         );
         const attachReference = (media: NodeItem) => {
           const exists = project.links.some((link) => link.from === media.id && link.to === activeOnlineVideoNode.id);
-          if (!exists) change((p) => ({ ...p, links: [...p.links, { id: newId(), from: media.id, to: activeOnlineVideoNode.id }] }));
+          const activeMode = source === "byok" ? normalizedByokVideoOptions.mode : config.mode || "text";
+          if (source === "byok") {
+            const limit = videoInputLimitForMode(byokVideoCapabilities, activeMode);
+            if (media.kind !== "image") {
+              setMessage(`当前“${selectedByokModelId || "未选择模型"}”只接收图片输入，不能把视频作为${videoModeLabel(activeMode)}参考。`);
+              return;
+            }
+            const existingImageCount = references.filter((item) => item.kind === "image" && Boolean(item.src)).length;
+            if (!exists && limit.maximum === 0) {
+              setMessage(`当前“${selectedByokModelId || "未选择模型"}”的${videoModeLabel(activeMode)}不接收图片参考。`);
+              return;
+            }
+            if (!exists && existingImageCount >= limit.maximum) {
+              const countText = limit.minimum === limit.maximum ? `恰好 ${limit.maximum}` : `最多 ${limit.maximum}`;
+              setMessage(`当前“${selectedByokModelId || "未选择模型"}”的${videoModeLabel(activeMode)}只支持${countText}张图片；请先移除已有参考。`);
+              return;
+            }
+          }
+          const occupiedFramePorts = project.links
+            .filter((link) => link.to === activeOnlineVideoNode.id)
+            .map((link) => link.toPort)
+            .filter(Boolean);
+          const targetPort = activeMode === "reference"
+            ? "references"
+            : activeMode === "firstLast"
+              ? (occupiedFramePorts.includes("firstFrame") ? "lastFrame" : "firstFrame")
+              : "firstFrame";
+          if (!exists && !connectCanvasNodes(media.id, activeOnlineVideoNode.id, { toPort: targetPort })) return;
           if (!(config.references || []).some((item) => item.id === media.id)) {
             update({ references: [...(config.references || []), { id: media.id, name: media.name, kind: media.kind as "image" | "video", src: media.src || "", source: "generated" }] });
           }
@@ -3681,8 +6134,19 @@ setPanning(false);
           setMessage(`已将“${media.name}”作为视频参考连接。`);
         };
         const removeReference = (reference: OnlineReference) => {
-          update({ references: (config.references || []).filter((item) => item.id !== reference.id) });
-          change((p) => ({ ...p, links: p.links.filter((link) => !(link.from === reference.id && link.to === activeOnlineVideoNode.id)) }));
+          change((current) => ({
+            ...current,
+            links: current.links.filter((link) => !(link.from === reference.id && link.to === activeOnlineVideoNode.id)),
+            nodes: current.nodes.map((node) => node.id === activeOnlineVideoNode.id
+              ? {
+                  ...node,
+                  workflow: {
+                    ...((node.workflow || {}) as OnlineVideoSettings),
+                    references: (((node.workflow || {}) as OnlineVideoSettings).references || []).filter((item) => item.id !== reference.id),
+                  },
+                }
+              : node),
+          }));
           setMessage(`已移除参考：“${reference.name}”。`);
         };
         const insertAtReference = (index: number) => {
@@ -3695,6 +6159,15 @@ setPanning(false);
         const appendPrompt = (text: string) => update({ prompt: `${config.prompt || ""}${config.prompt ? "，" : ""}${text}` });
         const rewritePrompt = async (action: "optimize" | "translate") => {
           const prompt = (config.prompt || "").trim();
+          const sourceProjectId = activeProjectIdRef.current;
+          const sourceNodeId = activeOnlineVideoNode.id;
+          const isRewriteCurrent = () => {
+            if (activeProjectIdRef.current !== sourceProjectId) return false;
+            const currentNode = projectRef.current.nodes.find((node) => node.id === sourceNodeId);
+            if (!currentNode) return false;
+            const currentWorkflow = (currentNode.workflow || {}) as OnlineVideoSettings;
+            return (currentWorkflow.prompt || "").trim() === prompt;
+          };
           const providerConfig = onlineProviderConfigs[config.provider || ""];
           if (!prompt) { setMessage("请先输入提示词，再进行优化或翻译。"); return; }
           if (config.provider !== "阿里百炼·万相" || !providerConfig?.apiKey) {
@@ -3711,12 +6184,24 @@ setPanning(false);
               prompt,
               action,
             });
-            update({ prompt: result.trim() });
+            if (!isRewriteCurrent()) {
+              addLog("提示词优化结果已丢弃：项目、节点或原始提示词已改变");
+              return;
+            }
+            // Do not spread the render-time `config` back into state: the
+            // user may have changed a different video option while the
+            // rewrite request was in flight.
+            change((current) => ({
+              ...current,
+              nodes: current.nodes.map((node) => node.id === sourceNodeId
+                ? { ...node, workflow: { ...(node.workflow || {}), prompt: result.trim() } }
+                : node),
+            }));
             setMessage(action === "translate" ? "提示词已翻译为英文。" : "提示词已优化，可直接生成。" );
           } catch (error) {
             const detail = String(error).replace(/^Error: /, "");
             addLog(`提示词${action === "translate" ? "翻译" : "优化"}：${detail}`);
-            setMessage(`提示词${action === "translate" ? "翻译" : "优化"}失败：${detail}`);
+            if (isRewriteCurrent()) setMessage(`提示词${action === "translate" ? "翻译" : "优化"}失败：${humanizeApiError(detail)}`);
           }
         };
         const nodeElement = document.querySelector<HTMLElement>(`article[data-node-id="${activeOnlineVideoNode.id}"]`);
@@ -3725,9 +6210,9 @@ setPanning(false);
         const nodeCenter = nodeRect ? nodeRect.left + nodeRect.width / 2 : panelWidth / 2;
         const panelLeft = Math.max(12, Math.min(nodeCenter - panelWidth / 2, window.innerWidth - panelWidth - 12));
         const panelTop = Math.max(12, (nodeRect?.bottom || 12) + 8);
-        const source: GenerationSource = config.source || "byok";
         const comfyLibraryItems = readComfyWorkflowLibrary().filter((item) => item.apiContent || item.format === "api");
-        const selectedComfyItem = comfyLibraryItems.find((item) => item.id === config.comfyWorkflowId);
+        const selectedComfyItem = comfyLibraryItems.find((item) => item.id === config.comfyWorkflowId)
+          || (comfyLibraryItems.length === 1 ? comfyLibraryItems[0] : undefined);
         const publishedComfyParameters = (selectedComfyItem?.parameters || []).filter((parameter) => parameter.enabled && isBasicComfyParameter(parameter));
         const generateOnlineVideo = async () => {
           const prompt = [config.prompt || "", ...linkedTextInputs].filter((text) => text.trim()).join("\n\n").trim();
@@ -3735,6 +6220,7 @@ setPanning(false);
             setMessage(`请先写入视频提示词；也可以把文本或参考素材连接到${generationSourceLabel[source]}节点。`);
             return;
           }
+          if (!validateExecutionGraph(activeOnlineVideoNode.id, "视频")) return;
           if (source === "comfy") {
             if (!comfyConnected) {
               void autoConnect();
@@ -3746,6 +6232,18 @@ setPanning(false);
               setMessage("请选择工作流库中的视频 API 工作流，并扫描要调整的参数。");
               return;
             }
+            const selectedComfyWorkflowSettings = !config.comfyWorkflowId
+              ? { ...config, comfyWorkflowId: selectedComfyItem.id, comfyValues: config.comfyValues || {} }
+              : null;
+            const inputProjectOverride = selectedComfyWorkflowSettings
+              ? {
+                  ...projectRef.current,
+                  nodes: projectRef.current.nodes.map((item) => item.id === activeOnlineVideoNode.id
+                    ? { ...item, workflow: selectedComfyWorkflowSettings }
+                    : item),
+                }
+              : undefined;
+            if (selectedComfyWorkflowSettings) update(selectedComfyWorkflowSettings);
             const apiContent = selectedComfyItem.apiContent || (selectedComfyItem.format === "api" ? selectedComfyItem.content : undefined);
             if (!apiContent) {
               setWorkflowLibraryOpen(true);
@@ -3753,62 +6251,146 @@ setPanning(false);
               return;
             }
             const configured = applyComfyParameters(apiContent, selectedComfyItem.parameters || [], config.comfyValues || {});
-            const runnable = injectComfyPrompt(configured, prompt);
             setMessage(`正在运行本地视频工作流“${selectedComfyItem.name}”…`);
-            await run(activeOnlineVideoNode.id, undefined, runnable);
+            await run(activeOnlineVideoNode.id, undefined, configured, prompt, inputProjectOverride);
             return;
           }
           if (source === "byok") {
-            if (config.provider === "未选择平台") {
-              openOnlineConfiguration("byok");
-              setMessage("请先选择平台并保存自带 API Key。 ");
+            if (!onlineVideoProviderNames.includes(config.provider || "")) {
+              openOnlineConfiguration("byok", config.provider === "未选择平台" ? undefined : config.provider);
+              setMessage("请先保存一个支持视频的 API 配置；保存后会直接显示在当前视频节点的平台和模型下拉框中。 ");
               return;
             }
             const savedProviderConfig = onlineProviderConfigs[config.provider || ""];
             const defaultProviderConfig = ONLINE_PROVIDER_DEFAULTS[config.provider || ""];
             const providerConfig = savedProviderConfig ? { ...defaultProviderConfig, ...savedProviderConfig } : undefined;
-            if (!providerConfig?.endpoint || !providerConfig.apiKey || !providerConfig.model) {
+            if (!providerConfig?.endpoint || !providerConfig.apiKey) {
               openOnlineConfiguration("byok", config.provider);
-              setMessage(`请先完成“${config.provider}”的接口地址、密钥和模型配置。`);
+              setMessage(`请先完成“${config.provider}”的接口地址和密钥配置。`);
               return;
             }
-            if (config.provider === "可灵 Kling" && !providerConfig.apiSecret?.trim()) {
+            if (!hasCompatibleByokVideoModel || !modelsForProvider(config.provider || "", "video").includes(selectedByokModelId)) {
               openOnlineConfiguration("byok", config.provider);
-              setMessage("可灵官方接口需要同时填写 Access Key 和 Secret Key。");
+              setMessage(`“${config.provider}”当前没有已确认的视频模型；文本或图片模型不会填入视频节点。请在配置台为正确模型勾选“视频”。`);
+              return;
+            }
+            if (config.provider === "可灵 Kling" && providerConfig.klingAuth === "aksk" && !providerConfig.apiSecret?.trim()) {
+              openOnlineConfiguration("byok", config.provider);
+              setMessage("可灵 AK/SK 签名方式需要同时填写 Access Key 和 Secret Key。");
               return;
             }
             if (!["阿里百炼·万相", "可灵 Kling", "豆包·火山方舟"].includes(config.provider || "")) {
               setMessage(`“${config.provider}”还没有专用视频协议适配，请使用万相、可灵或豆包。`);
               return;
             }
+            const configuredModel = selectedByokModelId;
+            const requestCapabilities = videoCapabilitiesFor(config.provider || "", configuredModel);
+            const normalizedRequestOptions = normalizeVideoGenerationOptions(requestCapabilities, {
+              mode: config.mode,
+              amount: config.amount,
+            });
+            const requestMode = normalizedRequestOptions.mode;
+            const requestQuality = config.provider === "可灵 Kling" && requestMode === "firstLast"
+              ? "1080P"
+              : config.quality || "720P";
+            const requestDuration = config.provider === "阿里百炼·万相" && requestMode === "firstLast"
+              ? 5
+              : config.duration || 5;
+            const requestAudio = supportsVideoAudio(requestCapabilities, requestMode) && config.audio !== false;
+            const hasNormalizedVideoSettings = normalizedRequestOptions.changed
+              || requestQuality !== config.quality
+              || requestDuration !== config.duration
+              || requestAudio !== config.audio
+              || configuredModel !== config.model
+              || config.modelPinned !== true;
+            const normalizedVideoPatch: Partial<OnlineVideoSettings> = {
+              model: configuredModel,
+              modelPinned: true,
+              mode: requestMode,
+              amount: normalizedRequestOptions.amount,
+              quality: requestQuality,
+              duration: requestDuration,
+              audio: requestAudio,
+            };
+            if (hasNormalizedVideoSettings) {
+              update(normalizedVideoPatch);
+            }
+            const unsupportedReferences = references.filter((item) => item.kind !== "image" || !item.src);
+            if (unsupportedReferences.length) {
+              setMessage(`“${configuredModel}”当前适配只会传递图片参考；请移除 ${unsupportedReferences.map((item) => `“${item.name}”`).join("、")} 后再生成。`);
+              return;
+            }
+            const imageReferences = references.filter((item) => item.kind === "image" && Boolean(item.src));
+            const inputErrors = validateVideoGenerationInput(requestCapabilities, {
+              mode: requestMode,
+              amount: normalizedRequestOptions.amount,
+              imageCount: imageReferences.length,
+            });
+            if (inputErrors.length) {
+              setMessage(`“${configuredModel}”${inputErrors.join("；")}。`);
+              return;
+            }
             const mentionedReference = Array.from(prompt.matchAll(/@图片(\d+)/g))
               .map((match) => references[Number(match[1]) - 1])
               .find((item): item is OnlineReference => Boolean(item?.src && item.kind === "image"));
-            const selectedImageReference = mentionedReference || references.find((item) => item.kind === "image" && Boolean(item.src));
-            const imageModel = (model: string) => {
-              if (!selectedImageReference || /i2v/i.test(model)) return model;
-              if (/^wan2\.6/i.test(model)) return "wan2.6-i2v-flash";
-              if (/^wan2\.5/i.test(model)) return "wan2.5-i2v-preview";
-              if (/^wan2\.2/i.test(model)) return "wan2.2-i2v-plus";
-              if (/^wanx?2\.1/i.test(model)) return "wanx2.1-i2v-turbo";
-              return model;
-            };
-            const configuredModel = config.model || providerConfig.model;
-            const requestModel = config.provider === "阿里百炼·万相" ? imageModel(configuredModel) : configuredModel;
-            const selectedImageReferences = config.mode === "reference"
-              ? references.filter((item) => item.kind === "image" && Boolean(item.src))
-              : config.mode === "text" ? [] : selectedImageReference ? [selectedImageReference] : [];
-            if (config.mode !== "text" && selectedImageReferences.length === 0) {
-              setMessage(`“${CLOUD_VIDEO_MODE_LABELS[(config.mode || "text") as CloudVideoMode]}”需要先添加或连接图片参考。`);
+            const firstFrameLink = project.links.find((link) => link.to === activeOnlineVideoNode.id && link.toPort === "firstFrame");
+            const lastFrameLink = project.links.find((link) => link.to === activeOnlineVideoNode.id && link.toPort === "lastFrame");
+            const firstFrameReference = imageReferences.find((item) => item.id === firstFrameLink?.from)
+              || mentionedReference
+              || imageReferences[0];
+            const lastFrameReference = imageReferences.find((item) => item.id === lastFrameLink?.from)
+              || imageReferences.find((item) => item.id !== firstFrameReference?.id);
+            if (requestMode === "firstLast" && (!firstFrameReference || !lastFrameReference || firstFrameReference.id === lastFrameReference.id)) {
+              setMessage(`“${configuredModel}”的首尾帧需要两张不同的图片，并分别连接到首帧和尾帧。`);
               return;
             }
+            const selectedImageReferences = requestMode === "text"
+              ? []
+              : requestMode === "image"
+                ? firstFrameReference ? [firstFrameReference] : []
+                : requestMode === "firstLast"
+                  ? [firstFrameReference!, lastFrameReference!]
+                  : imageReferences;
+            const requestModel = normalizeExplicitProviderModelId(configuredModel);
             const providerShortName = config.provider === "可灵 Kling" ? "可灵" : config.provider === "豆包·火山方舟" ? "豆包" : "万相";
-            change((p) => ({ ...p, nodes: p.nodes.map((node) => node.id === activeOnlineVideoNode.id ? { ...node, status: "running" } : node) }));
+            // `update()` is batched by React. Sign the same configuration that
+            // it will persist, so automatic capability normalisation cannot
+            // make this very request look stale on its own completion.
+            const inputProject = hasNormalizedVideoSettings
+              ? {
+                  ...projectRef.current,
+                  nodes: projectRef.current.nodes.map((item) => item.id === activeOnlineVideoNode.id
+                    ? { ...item, workflow: { ...config, ...normalizedVideoPatch } }
+                    : item),
+                }
+              : projectRef.current;
+            const runToken = runRegistry.current.start(activeProjectIdRef.current, activeOnlineVideoNode.id);
+            const runInputSignature = createExecutionInputSignature(inputProject, activeOnlineVideoNode.id);
+            setRuntimeNodeStatus(activeOnlineVideoNode.id, "running");
+            let providerProgressTimer: number | undefined;
             try {
               const { invoke } = await import("@tauri-apps/api/core");
-              setMessage(selectedImageReferences.length
-                ? `${providerShortName}正在使用 ${selectedImageReferences.length} 张参考图生成视频${linkedTextInputs.length ? `，并合并 ${linkedTextInputs.length} 个文本输入` : ""}…`
-                : `${providerShortName}正在提交“${requestModel}”文生视频任务${linkedTextInputs.length ? `，已合并 ${linkedTextInputs.length} 个文本输入` : ""}。`);
+              const imageInputDetail = requestMode === "firstLast"
+                ? "首帧与尾帧各 1 张图片"
+                : selectedImageReferences.length
+                  ? `${selectedImageReferences.length} 张图片`
+                  : "文生视频";
+              setMessage(`${providerShortName}正在提交“${requestModel}”${videoModeLabel(requestMode)}任务（密钥已读取 · ${imageInputDetail} · ${requestQuality} · ${requestDuration}s）${linkedTextInputs.length ? `，并合并 ${linkedTextInputs.length} 个文本输入` : ""}…`);
+              // A canvas image may now be stored in AppLocalData. Convert it
+              // only for this outbound API request; keeping its preview URL in
+              // the node avoids persisting Base64 into the project itself.
+              const requestImages = await Promise.all(selectedImageReferences.map(async (reference) => [
+                reference.id,
+                await readSourceAsDataUrl(reference.src),
+              ] as const));
+              if (!canCommitRunWithInputs(runToken, runInputSignature)) return;
+              const requestImageById = new Map(requestImages);
+              const providerRequestStartedAt = Date.now();
+              providerProgressTimer = window.setInterval(() => {
+                if (!runRegistry.current.canCommit(runToken.projectId, runToken.nodeId, runToken.runId)) return;
+                const elapsedSeconds = Math.max(1, Math.round((Date.now() - providerRequestStartedAt) / 1000));
+                setMessage(`${providerShortName}密钥已随请求发送；正在等待平台生成“${requestModel}”（已等待 ${elapsedSeconds} 秒）…`);
+              }, 15_000);
               const result = await invoke<{ task_id: string; request_id?: string; video_url: string }>("generate_provider_video", {
                 provider: config.provider,
                 endpoint: providerConfig.endpoint,
@@ -3816,34 +6398,48 @@ setPanning(false);
                 apiSecret: providerConfig.apiSecret || null,
                 model: requestModel,
                 prompt,
-                mode: config.mode || "text",
+                mode: requestMode,
                 ratio: config.ratio || "16:9",
-                quality: config.quality || "720P",
-                duration: config.duration || 5,
-                audio: config.audio !== false,
-                imageUrls: selectedImageReferences.map((item) => item.src),
+                quality: requestQuality,
+                duration: requestDuration,
+                audio: requestAudio,
+                imageUrls: requestImages.map(([, source]) => source),
+                firstFrameUrl: requestMode === "firstLast" || requestMode === "image" ? requestImageById.get(firstFrameReference?.id || "") || null : null,
+                lastFrameUrl: requestMode === "firstLast" ? requestImageById.get(lastFrameReference?.id || "") || null : null,
+                amount: normalizedRequestOptions.amount,
               });
+              if (!canCommitRunWithInputs(runToken, runInputSignature)) return;
               const [generatedWidth, generatedHeight] = onlineVideoSizeForRatio(config.ratio);
               const generated: NodeItem = {
                 id: newId(), kind: "video", x: activeOnlineVideoNode.x + activeOnlineVideoNode.width + 80, y: activeOnlineVideoNode.y,
                 width: generatedWidth, height: generatedHeight + 29, name: `${providerShortName}-${result.task_id}.mp4`, fileName: `${providerShortName}-${result.task_id}.mp4`, src: result.video_url, createdAt: Date.now(),
               };
-              setRecent((items) => [generated, ...items]);
-              setRecentOpen(true);
-              change((p) => ({
-                ...p,
-                nodes: [
-                  ...p.nodes.map((node) => node.id === activeOnlineVideoNode.id ? { ...node, status: "done" } : node),
-                  generated,
-                ],
-                links: [...p.links, { id: newId(), from: activeOnlineVideoNode.id, to: generated.id }],
-              }));
-              setMessage(`${providerShortName}视频生成成功，已创建独立视频素材节点并连接到 AI 视频节点。`);
+              if (activeOnlineVideoNode.kind === "video") {
+                change((p) => ({ ...p, nodes: p.nodes.map((node) => node.id === activeOnlineVideoNode.id ? { ...node, status: "done", src: result.video_url, fileName: generated.fileName, name: generated.name, mediaWidth: generatedWidth, mediaHeight: generatedHeight } : node) }));
+                setMessage(`${providerShortName}视频已直接生成到当前视频节点。`);
+              } else {
+                setRecent((items) => [generated, ...items]);
+                setRecentOpen(true);
+                change((p) => appendTypedLink({
+                  ...p,
+                  nodes: [...p.nodes.map((node) => node.id === activeOnlineVideoNode.id ? { ...node, status: "done" } : node), generated],
+                }, activeOnlineVideoNode.id, generated.id).project);
+                setMessage(`${providerShortName}视频生成成功，已创建独立视频素材节点并连接到 AI 视频节点。`);
+              }
+              runRegistry.current.finish(runToken.projectId, runToken.nodeId, runToken.runId);
             } catch (error) {
               const detail = String(error).replace(/^Error: /, "");
               addLog(`${config.provider}：${detail}`);
-              change((p) => ({ ...p, nodes: p.nodes.map((node) => node.id === activeOnlineVideoNode.id ? { ...node, status: "error" } : node) }));
-              setMessage(`${providerShortName}生成失败：${detail}`);
+              if (canCommitRunWithInputs(runToken, runInputSignature)) {
+                setRuntimeNodeStatus(activeOnlineVideoNode.id, "error");
+                runRegistry.current.finish(runToken.projectId, runToken.nodeId, runToken.runId);
+                const authenticationFailure = config.provider === "可灵 Kling" && /\b401\b|auth failed|unauthorized|鉴权失败/i.test(detail);
+                setMessage(authenticationFailure
+                  ? "可灵生成未提交：API 鉴权失败（401）。请在“添加配置”中确认密钥类型；单 API Key 与 Access Key + Secret Key 不能混用，修改后请先点“测试连接”。"
+                  : `${providerShortName}生成失败：${humanizeApiError(detail)}`);
+              }
+            } finally {
+              if (providerProgressTimer !== undefined) window.clearInterval(providerProgressTimer);
             }
             return;
           }
@@ -3861,20 +6457,20 @@ setPanning(false);
               {references.slice(0, 6).map((item, index) => <div className="online-reference-stack-card" key={item.id} title={`@图片${index + 1} · ${item.name}`}>
                 {item.kind === "video" ? <video src={item.src} muted playsInline /> : <img src={item.src} alt={item.name} />}
                 <span className="online-reference-label">图片{index + 1}</span>
-                <button aria-label={`移除 ${item.name}`} title="移除参考" onClick={() => removeReference(item)}>×</button>
+                <button aria-label={`移除 ${item.name}`} title="移除参考" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); removeReference(item); }}>×</button>
               </div>)}
             </div>}
             <div className="online-reference-adders">
-              <button className="online-reference-add canvas" title="从画布生成内容添加参考" aria-label="从画布生成内容添加参考" onClick={() => setOnlinePopover({ nodeId: activeOnlineVideoNode.id, kind: "reference" })}><strong>＋</strong><small>画布生成</small></button>
-              <button className="online-reference-add computer" title="从电脑选择图片或视频参考" aria-label="从电脑选择图片或视频参考" onClick={() => onlineReferenceRef.current?.click()}><strong>＋</strong><small>电脑文件</small></button>
+              <button className="online-reference-add canvas" disabled={referenceAddDisabled} title={referenceAddDisabled ? "当前模式暂时不能再添加参考图" : "从画布生成内容添加参考"} aria-label="从画布生成内容添加参考" onClick={() => setOnlinePopover({ nodeId: activeOnlineVideoNode.id, kind: "reference" })}><strong>＋</strong><small>画布生成</small></button>
+              <button className="online-reference-add computer" disabled={referenceAddDisabled} title={referenceAddDisabled ? "当前模式暂时不能再添加参考图" : "从电脑选择图片参考"} aria-label="从电脑选择图片参考" onClick={() => onlineReferenceRef.current?.click()}><strong>＋</strong><small>电脑文件</small></button>
             </div>
             <div className="online-reference-actions">
-              <button className="online-prompt-library-trigger online-prompt-library-trigger-inline" title="提示词库：动作、运镜、效果" onClick={() => setOnlinePopover(popover === "promptLibrary" ? null : { nodeId: activeOnlineVideoNode.id, kind: "promptLibrary" })}>提示词库</button>
-              {references.length > 0 && <button className="online-at-reference-trigger" title="在提示词中引用上方参考图" onClick={() => setAtReferenceMenu({ nodeId: activeOnlineVideoNode.id, start: (config.prompt || "").length, end: (config.prompt || "").length })}>@图片</button>}
+              <button className="online-prompt-library-trigger online-prompt-library-trigger-inline" title="打开提示词库：搜索、分类、保存并写入当前提示词" onClick={() => setPromptLibraryTarget({ nodeId: activeOnlineVideoNode.id, kind: "video" })}>提示词库</button>
+              {references.length > 0 && <button className="online-at-reference-trigger" title="选择参考图并写入提示词；不会打开或更改配置" onClick={() => { setOnlinePopover(null); setAtReferenceMenu({ nodeId: activeOnlineVideoNode.id, start: (config.prompt || "").length, end: (config.prompt || "").length }); }}>@图片</button>}
             </div>
           </div>
           {activeAtReference && references.length > 0 && <div className="online-at-reference-menu" onPointerDown={(event) => event.stopPropagation()}>
-            <small>引用上方参考图</small>
+            <small>选择后仅写入提示词，不会更改配置</small>
             <div>{references.slice(0, 6).map((item, index) => <button key={item.id} title={`写入 @图片${index + 1}`} onClick={() => insertAtReference(index)}>
               {item.kind === "video" ? <video src={item.src} muted playsInline /> : <img src={item.src} alt="" />}<span>@图片{index + 1}</span>
             </button>)}</div>
@@ -3888,12 +6484,9 @@ setPanning(false);
             {popover === "character" && <><b>角色参考</b><small>选择已生成的角色图后会自动连线并写入提示词。</small><div className="online-reference-list">{generatedCandidates.filter((item) => item.kind === "image").map((item) => <button key={item.id} onClick={() => attachReference(item)}>{item.src && <img src={item.src} alt="" />}<span>{item.name}</span></button>)}</div></>}
             {popover === "effect" && <><b>选择特效</b><div className="online-token-list">{["电影级光影", "慢动作", "粒子飞散", "胶片质感", "梦幻柔焦"].map((item) => <button key={item} onClick={() => { appendPrompt(item); setOnlinePopover(null); }}>{item}</button>)}</div></>}
             {popover === "camera" && <><b>选择运镜</b><div className="online-token-list">{["镜头缓慢推进", "镜头缓慢拉远", "从左向右平移", "低机位仰拍", "环绕主体运镜"].map((item) => <button key={item} onClick={() => { appendPrompt(item); setOnlinePopover(null); }}>{item}</button>)}</div></>}
-            {popover === "promptLibrary" && <><b>提示词库</b><small>这里会保存你常用的动作、运镜和效果；点击关键词即可写入当前提示词。</small><div className="online-prompt-library-input"><input value={promptLibraryText} onChange={(event) => setPromptLibraryText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && promptLibraryText.trim()) { const entry = promptLibraryText.trim(); setPromptLibraryEntries((items) => { const next = [entry, ...items.filter((item) => item !== entry)].slice(0, 48); localStorage.setItem("yimu-prompt-library", JSON.stringify(next)); return next; }); setPromptLibraryText(""); } }} placeholder="保存常用提示词，如：镜头缓慢推进" /><button disabled={!promptLibraryText.trim()} onClick={() => { const entry = promptLibraryText.trim(); setPromptLibraryEntries((items) => { const next = [entry, ...items.filter((item) => item !== entry)].slice(0, 48); localStorage.setItem("yimu-prompt-library", JSON.stringify(next)); return next; }); setPromptLibraryText(""); }}>保存</button></div>{promptLibraryEntries.length > 0 && <div className="online-prompt-library online-prompt-library-saved"><div><strong>我的词库</strong>{promptLibraryEntries.map((item) => <span key={item}><button title="点击写入提示词" onClick={() => { appendPrompt(item); setOnlinePopover(null); }}>{item}</button><button className="online-prompt-delete" title="从词库删除" aria-label={`删除 ${item}`} onClick={() => setPromptLibraryEntries((items) => { const next = items.filter((saved) => saved !== item); localStorage.setItem("yimu-prompt-library", JSON.stringify(next)); return next; })}>×</button></span>)}</div></div>}<div className="online-prompt-library">{[
-              ["动作", ["缓慢转身", "抬手凝望", "向前行走", "回眸微笑"]],
-              ["运镜", ["镜头缓慢推进", "镜头缓慢拉远", "从左向右平移", "环绕主体运镜"]],
-              ["效果", ["电影级光影", "慢动作", "粒子飞散", "胶片质感"]],
-            ].map(([title, tokens]) => <div key={title as string}><strong>{title as string}</strong>{(tokens as string[]).map((item) => <button key={item} onClick={() => { appendPrompt(item); setOnlinePopover(null); }}>{item}</button>)}</div>)}</div></>}
+            {popover === "promptLibrary" && <><b>提示词库</b><small>已改为独立面板，可搜索、分类、重命名并插入当前提示词。</small><button onClick={() => setPromptLibraryTarget({ nodeId: activeOnlineVideoNode.id, kind: "video" })}>打开提示词库</button></>}
           </div>}
+          {linkedTextInputs.length > 0 && <div className="online-linked-input-note" title="这些内容来自连到当前视频节点的文本或分镜节点，会在提交时自动合并进提示词。">已连接 {linkedTextInputs.length} 条文本输入 · 生成时自动带入</div>}
           <textarea className="online-video-prompt" autoFocus value={config.prompt || ""} onChange={(event) => {
             const value = event.target.value;
             const caret = event.currentTarget.selectionStart ?? value.length;
@@ -3903,22 +6496,26 @@ setPanning(false);
             else setAtReferenceMenu(null);
           }} onKeyDown={(event) => { if (event.key === "Escape") { setAtReferenceMenu(null); } else if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); generateOnlineVideo(); } }} placeholder="描述你想要生成的画面内容，输入 @ 可引用上方图片" />
           <div className="online-video-consolebar">
-            {source === "byok" && <select aria-label="平台" value={config.provider} onChange={(event) => {
+            {source === "byok" && (onlineVideoProviderNames.length ? <select aria-label="平台" value={onlineVideoProviderNames.includes(config.provider || "") ? config.provider : ""} onChange={(event) => {
               const provider = event.target.value;
-              const saved = onlineProviderConfigs[provider];
-              const defaults = ONLINE_PROVIDER_DEFAULTS[provider];
-              const providerConfig = saved ? { ...defaults, ...saved } : defaults;
-              const models = (providerConfig?.detectedModels || []).filter((model) => model.kind === "video");
-              const model = models.find((item) => item.modes?.includes(cloudMode)) || models[0];
-              const selectedModel = providerConfig?.model && !models.some((item) => item.id === providerConfig.model)
-                ? { ...classifyProviderModel(providerConfig.model), modes: models[0]?.modes }
-                : model;
-              update({ provider, ...(selectedModel ? { model: selectedModel.id, mode: selectedModel.modes?.includes(cloudMode) ? cloudMode : selectedModel.modes?.[0] || cloudMode } : {}) });
-            }}><option>未选择平台</option>{onlineVideoProviderNames.map((provider) => <option key={provider}>{provider}</option>)}</select>}
+              const requestedMode = (config.mode || "text") as VideoGenerationMode;
+              const candidateIds = modelsForProvider(provider, "video");
+              const model = candidateIds.find((id) => videoCapabilitiesFor(provider, id).modes.includes(requestedMode))
+                || candidateIds[0]
+                || "";
+              const nextCapabilities = videoCapabilitiesFor(provider, model);
+              const nextOptions = normalizeVideoGenerationOptions(nextCapabilities, { mode: requestedMode, amount: config.amount });
+              update({ provider, model, modelPinned: false, mode: nextOptions.mode, amount: nextOptions.amount });
+            }}>
+              {!onlineVideoProviderNames.includes(config.provider || "") && <option value="">选择已保存的视频平台</option>}
+              {onlineVideoProviderNames.map((provider) => <option key={provider}>{provider}</option>)}
+            </select> : <span className="online-video-source-status">先添加视频配置</span>)}
             {source === "byok" && byokModels.length > 0 && <select className="cloud-video-model-select" aria-label="自带密钥视频模型" title={byokModel?.purpose} value={byokModel?.id || ""} onChange={(event) => {
-              const model = byokModels.find((item) => item.id === event.target.value);
-              update({ model: event.target.value, mode: model?.modes?.length && !model.modes.includes(cloudMode) ? model.modes[0] : cloudMode });
+              const nextCapabilities = videoCapabilitiesFor(config.provider || "", event.target.value);
+              const nextOptions = normalizeVideoGenerationOptions(nextCapabilities, { mode: config.mode, amount: config.amount });
+              update({ model: event.target.value, modelPinned: true, mode: nextOptions.mode, amount: nextOptions.amount });
             }}>{byokModels.map((model) => <option value={model.id} key={model.id}>{model.id}｜{model.purpose}</option>)}</select>}
+            {source === "byok" && byokModels.length === 0 && <button className="online-video-source-status" onClick={() => openOnlineConfiguration("byok", config.provider)} title="当前平台没有已确认的视频生成模型">无匹配视频模型</button>}
             {source === "comfy" && <button className={`online-video-source-status ${comfyConnected ? "ready" : ""}`} title="检查本地 ComfyUI" onClick={() => void autoConnect()}>{comfyConnected ? "本地已连接" : "未连接 ComfyUI"}</button>}
             {source === "comfy" && <select className="online-video-workflow-select" aria-label="ComfyUI 工作流" value={config.comfyWorkflowId || ""} onChange={(event) => update({ comfyWorkflowId: event.target.value, comfyValues: {} })}><option value="">选择工作流</option>{comfyLibraryItems.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select>}
             {source === "cloud" && <select aria-label="云端视频平台" value={cloudPlatform} onChange={(event) => {
@@ -3933,23 +6530,32 @@ setPanning(false);
               update({ model: event.target.value, mode: supportsCloudVideoMode(nextModel, cloudMode) ? cloudMode : nextModel?.videoModes?.[0] || "text" });
             }}>{cloudModels.map((model) => <option value={model.id} key={model.id}>{model.label}｜{(model.videoModes || []).map((mode) => CLOUD_VIDEO_MODE_LABELS[mode]).join("、")}</option>)}</select>}
             {source === "cloud" && cloudModel && <span className="cloud-model-purpose" title={cloudModel.description}><b>{cloudModeText}</b><small>{cloudModel.description}</small></span>}
-            <select aria-label="视频生成模式" value={config.mode} onChange={(event) => {
-              const mode = event.target.value as CloudVideoMode;
-              if (source === "byok" && byokModels.length) {
-                if (byokModel?.modes?.includes(mode)) { update({ mode }); return; }
-                const compatible = byokModels.find((model) => model.modes?.includes(mode));
-                if (compatible) { update({ mode, model: compatible.id }); setMessage(`已自动切换到支持“${CLOUD_VIDEO_MODE_LABELS[mode]}”的 ${compatible.id}。`); }
-                else setMessage(`该平台已识别的视频模型不支持“${CLOUD_VIDEO_MODE_LABELS[mode]}”。`);
+            <select aria-label="视频生成模式" value={displayedVideoMode} onChange={(event) => {
+              const mode = event.target.value as VideoGenerationMode;
+              if (source === "byok") {
+                if (byokVideoCapabilities.modes.includes(mode)) {
+                  update({ mode, amount: byokVideoCapabilities.amounts[0] });
+                  return;
+                }
+                const compatible = byokModels.find((model) => videoCapabilitiesFor(config.provider || "", model.id).modes.includes(mode));
+                if (compatible) {
+                  const capabilities = videoCapabilitiesFor(config.provider || "", compatible.id);
+                  update({ mode, model: compatible.id, modelPinned: true, amount: capabilities.amounts[0] });
+                  setMessage(`已自动切换到支持“${videoModeLabel(mode)}”的 ${compatible.id}。`);
+                } else {
+                  setMessage(`“${config.provider}”当前已配置模型不支持“${videoModeLabel(mode)}”。`);
+                }
                 return;
               }
-              if (source !== "cloud" || supportsCloudVideoMode(cloudModel, mode)) { update({ mode }); return; }
-              const samePlatformModel = cloudModels.find((model) => supportsCloudVideoMode(model, mode));
-              const compatibleModel = samePlatformModel || cloudModelsFor("video").find((model) => supportsCloudVideoMode(model, mode));
-              update({ mode, provider: compatibleModel?.platform || cloudPlatform, model: compatibleModel?.id || cloudModel?.id });
-              setMessage(compatibleModel ? `已自动切换到支持“${CLOUD_VIDEO_MODE_LABELS[mode]}”的 ${compatibleModel.label}。` : `当前云端模型暂不支持“${CLOUD_VIDEO_MODE_LABELS[mode]}”。`);
-            }}>{Object.entries(modes).map(([value, label]) => <option value={value} key={value}>{label}{source === "cloud" && !supportsCloudVideoMode(cloudModel, value as CloudVideoMode) ? "（将自动换模型）" : ""}</option>)}</select>
+              const cloudMode = mode as CloudVideoMode;
+              if (source !== "cloud" || supportsCloudVideoMode(cloudModel, cloudMode)) { update({ mode: cloudMode }); return; }
+              const samePlatformModel = cloudModels.find((model) => supportsCloudVideoMode(model, cloudMode));
+              const compatibleModel = samePlatformModel || cloudModelsFor("video").find((model) => supportsCloudVideoMode(model, cloudMode));
+              update({ mode: cloudMode, provider: compatibleModel?.platform || cloudPlatform, model: compatibleModel?.id || cloudModel?.id });
+              setMessage(compatibleModel ? `已自动切换到支持“${CLOUD_VIDEO_MODE_LABELS[cloudMode]}”的 ${compatibleModel.label}。` : `当前云端模型暂不支持“${CLOUD_VIDEO_MODE_LABELS[cloudMode]}”。`);
+            }}>{selectableVideoModes.map((mode) => <option value={mode} key={mode}>{modes[mode]}{source === "byok" && !byokVideoCapabilities.modes.includes(mode) ? "（将自动换模型）" : source === "cloud" && !supportsCloudVideoMode(cloudModel, mode as CloudVideoMode) ? "（将自动换模型）" : ""}</option>)}</select>
             <div className="online-video-menu-anchor">
-              <button className="online-video-params-trigger" title="视频参数" aria-label="视频参数" onClick={() => setOnlinePopover(popover === "params" ? null : { nodeId: activeOnlineVideoNode.id, kind: "params" })}>▭ {source === "comfy" ? `${selectedComfyItem?.name || "选择工作流"} · ${publishedComfyParameters.length}项参数` : `${config.ratio} · ${config.quality} · ${config.duration}s · ${config.amount}个 · ${config.audio ? "🔊" : "🔇"}`}⌄</button>
+              <button className="online-video-params-trigger" title={source === "byok" && !byokSupportsAudio ? "当前模型不支持原生音频" : "视频参数"} aria-label="视频参数" onClick={() => setOnlinePopover(popover === "params" ? null : { nodeId: activeOnlineVideoNode.id, kind: "params" })}>▭ {source === "comfy" ? `${selectedComfyItem?.name || "选择工作流"} · ${publishedComfyParameters.length}项参数` : `${config.ratio} · ${config.quality} · ${config.duration}s · ${displayedVideoAmount}个 · ${displayedVideoAudio ? "🔊" : "🔇"}`}⌄</button>
               {popover === "params" && <div className="online-video-floating-popover online-video-params-popover">
                 <b>{source === "comfy" ? "ComfyUI 工作流参数" : "视频参数"}</b><small>{source === "comfy" ? "参数来自工作流库，只修改当前节点的运行副本。" : "比例、清晰度、时长、音频与生成数量。"}</small>
                 {source === "comfy" ? <div className="online-comfy-parameter-list">
@@ -3962,14 +6568,13 @@ setPanning(false);
                 <div className="online-param-section online-param-wide"><strong>比例</strong><div className="online-param-options online-param-ratios">{["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"].map((item) => <button className={config.ratio === item ? "active" : ""} key={item} onClick={() => update({ ratio: item })}>{item}</button>)}</div></div>
                 <div className="online-param-section"><strong>清晰度</strong><div className="online-param-options">{["480P", "720P", "1080P", "4K"].map((item) => <button className={config.quality === item ? "active" : ""} key={item} onClick={() => update({ quality: item })}>{item}</button>)}</div></div>
                 <div className="online-param-section"><strong>视频时长</strong><label className="online-duration-control"><input type="range" min="5" max="10" step="1" value={config.duration} onChange={(event) => update({ duration: Number(event.target.value) })} /><output>{config.duration} 秒</output></label></div>
-                <div className="online-param-section"><strong>生成音频</strong><div className="online-param-options two"><button className={config.audio ? "active" : ""} onClick={() => update({ audio: true })}>开启</button><button className={!config.audio ? "active" : ""} onClick={() => update({ audio: false })}>关闭</button></div></div>
-                <div className="online-param-section"><strong>生成数量</strong><div className="online-param-options three">{[1, 2, 4].map((item) => <button className={config.amount === item ? "active" : ""} key={item} onClick={() => update({ amount: item })}>{item}个</button>)}</div></div>
+                <div className="online-param-section"><strong>生成音频</strong>{source === "byok" && !byokSupportsAudio ? <small>当前模型不支持原生音频；不会提交音频参数。</small> : <div className="online-param-options two"><button className={config.audio ? "active" : ""} onClick={() => update({ audio: true })}>开启</button><button className={!config.audio ? "active" : ""} onClick={() => update({ audio: false })}>关闭</button></div>}</div>
+                <div className="online-param-section"><strong>生成数量</strong><div className="online-param-options three">{selectableVideoAmounts.map((item) => <button className={displayedVideoAmount === item ? "active" : ""} key={item} onClick={() => update({ amount: item })}>{item}个</button>)}</div></div>
                 </>}
               </div>}
             </div>
-            <button className="online-video-icon-button" title="提示词优化" aria-label="提示词优化" onClick={() => void rewritePrompt("optimize")}>✧</button><button className="online-video-icon-button" title="翻译提示词为英文" aria-label="翻译提示词为英文" onClick={() => void rewritePrompt("translate")}>文</button><div className="online-video-menu-anchor"><button className="online-video-icon-button" title="生成来源设置" aria-label="生成来源设置" onClick={() => setOnlinePopover(popover === "settings" ? null : { nodeId: activeOnlineVideoNode.id, kind: "settings" })}>☷</button>{popover === "settings" && <div className="online-video-floating-popover online-video-source-popover"><b>生成设置</b><small>选择生成来源；密钥和云端的配置可在对应来源下继续设置。</small><div className="online-settings-sources"><button className={source === "comfy" ? "active" : ""} onClick={() => { update({ source: "comfy" }); setOnlinePopover(null); }}>本地 ComfyUI</button><button className={source === "byok" ? "active" : ""} onClick={() => { update({ source: "byok" }); setOnlinePopover(null); }}>自带密钥</button><button className={source === "cloud" ? "active" : ""} onClick={() => { const platform = cloudPlatforms[0]; update({ source: "cloud", provider: platform, model: defaultCloudModel("video", platform)?.id }); setOnlinePopover(null); }}>亿幕云端积分</button></div></div>}</div>
-            {cloudEstimate && <div className="cloud-points-estimate" title={`${cloudEstimate.detail}；最终以服务端结算为准`}><small>输入 {cloudEstimate.input} + 输出 {cloudEstimate.output}</small><b>预计 {cloudEstimate.total} 积分</b></div>}
-            <button className="online-video-generate" title="生成视频（Enter）" onClick={generateOnlineVideo}>生成 <span>↵</span></button>
+            <button className="online-video-icon-button" title="提示词优化" aria-label="提示词优化" onClick={() => void rewritePrompt("optimize")}>✧</button><button className="online-video-icon-button" title="翻译提示词为英文" aria-label="翻译提示词为英文" onClick={() => void rewritePrompt("translate")}>文</button><div className="online-video-menu-anchor"><button className="online-video-icon-button" title="生成来源设置" aria-label="生成来源设置" onClick={() => setOnlinePopover(popover === "settings" ? null : { nodeId: activeOnlineVideoNode.id, kind: "settings" })}>☷</button>{popover === "settings" && <div className="online-video-floating-popover online-video-source-popover"><b>生成设置</b><small>本地 ComfyUI 在这里切换；云端平台请用左侧“添加配置 / 已配置”管理。</small><div className="online-settings-sources"><button className={source === "comfy" ? "active" : ""} onClick={() => { update({ source: "comfy" }); void autoConnect(); setOnlinePopover(null); }}>本地 ComfyUI</button><button className={source === "byok" ? "active" : ""} onClick={() => { update({ source: "byok" }); setOnlinePopover(null); }}>已保存 API 配置</button></div></div>}</div>
+            <button className="online-video-generate" disabled={source === "byok" && !hasCompatibleByokVideoModel} title={source === "byok" && !hasCompatibleByokVideoModel ? "请先配置真正支持视频的模型" : "生成视频（Enter）"} onClick={generateOnlineVideo}>{source === "byok" && !hasCompatibleByokVideoModel ? "配置视频模型" : "生成"} <span>↵</span></button>
           </div>
         </section>;
       })()}
@@ -4271,7 +6876,15 @@ setPanning(false);
                       add(
                         x.kind,
                         { x: 420, y: 300 },
-                        { name: x.name, src: x.src },
+                        {
+                          name: x.name,
+                          src: x.src,
+                          localPath: x.localPath,
+                          fallbackSrc: x.fallbackSrc,
+                          fileName: x.fileName || x.name,
+                          mediaWidth: x.mediaWidth,
+                          mediaHeight: x.mediaHeight,
+                        },
                       )
                     }
                   >
@@ -4420,38 +7033,26 @@ const workflowId = project.links
               >
                 导入 API 工作流
               </button>
-              <div className="menu-submenu">
-                <button className="menu-submenu-trigger">
-                  <span>网络节点</span>
-                  <span aria-hidden="true">›</span>
-                </button>
-                <div className="menu-submenu-panel">
-                  <button
-                    onClick={() => {
-                      add("aiText", pastePoint.current || viewportCenter(), { name: "AI 剧本生成", workflow: { source: "byok", provider: "OpenAI", model: "gpt-4.1-mini", genre: "剧情短片", format: "标准影视剧本", length: "中篇", tone: "电影感", audience: "大众", language: "简体中文", creativity: 0.8, episodeCount: 1, episodeMinutes: 5, includeStoryboard: true, includeCharacters: true } satisfies AiTextSettings });
-                      setMenu(null);
-                    }}
-                  >
-                    AI 剧本生成
-                  </button>
-                  <button
-                    onClick={() => {
-                      add("aiImage", pastePoint.current || viewportCenter(), { name: "AI 图片生成", workflow: { source: "byok", provider: "OpenAI", model: "gpt-image-1", mode: "text", ratio: "16:9", resolution: "1024", amount: 1, style: "电影写实", seed: -1, guidance: 7 } satisfies AiImageSettings });
-                      setMenu(null);
-                    }}
-                  >
-                    AI 图片生成
-                  </button>
-                  <button
-                    onClick={() => {
-                      add("onlineVideo", pastePoint.current || viewportCenter(), { name: "AI 视频生成", workflow: { source: "byok", provider: "未选择平台", mode: "text", ratio: "16:9", quality: "720P", duration: 5, amount: 1, audio: true } satisfies OnlineVideoSettings });
-                      setMenu(null);
-                    }}
-                  >
-                    AI 视频生成
-                  </button>
-                </div>
-              </div>
+              <button
+                onClick={() => {
+                  const position = pastePoint.current || viewportCenter();
+                  const text = "情绪转折点。\n冷静的表象下是汹涌的告别。";
+                  const { width, height } = annotationMetrics(text, 250);
+                  const annotationId = newId();
+                  const pointerId = newId();
+                  change((project) => ({
+                    ...project,
+                    nodes: [
+                      ...project.nodes,
+                      { id: annotationId, kind: "annotation", x: position.x, y: position.y, width, height, name: "镜头批注", text, rotation: -8, pointerId, createdAt: Date.now() },
+                      { id: pointerId, kind: "annotationPointer", x: position.x + width - 18, y: position.y + height - 20, width: 58, height: 58, name: "批注指向", rotation: -8, annotationId, createdAt: Date.now() },
+                    ],
+                  }));
+                  setMenu(null);
+                }}
+              >
+                添加镜头批注
+              </button>
               <hr />
               <button
                 onClick={() => {
@@ -4519,8 +7120,9 @@ const workflowId = project.links
       )}
       {activeAiNodeItem && !activeOnlineVideoNode && (
         <AiGenerationComposer
-          node={activeAiNodeItem as NodeItem & { kind: "aiText" | "aiImage" }}
+          node={activeAiNodeItem as NodeItem & { kind: "aiText" | "aiImage" | "text" | "image" }}
           referenceImages={activeAiReferences}
+          linkedTextInputs={activeAiLinkedTextInputs}
           canvasImages={canvasAiImages}
           onUpdate={(workflow) => change((current) => ({
             ...current,
@@ -4530,11 +7132,26 @@ const workflowId = project.links
           onClose={() => setActiveAiNode(null)}
           onOpenWorkflowLibrary={() => setWorkflowLibraryOpen(true)}
           onDescribeImage={(image) => describeAiTextImage(activeAiNodeItem, image)}
+          onImportReference={(file) => importAiReference(activeAiNodeItem.id, file)}
+          onRemoveReference={(reference) => removeAiReference(activeAiNodeItem.id, reference)}
+          providerOptions={activeAiNodeItem.kind === "aiText" || activeAiNodeItem.kind === "text" ? textProviderOptions : imageProviderOptions}
+          onOpenApiConfiguration={() => {
+            const workflow = (activeAiNodeItem.workflow || {}) as AiTextSettings & AiImageSettings;
+            if (activeAiNodeItem.kind === "aiText" || activeAiNodeItem.kind === "text") {
+              requestAiTextProviderConfiguration(workflow.provider || "OpenAI");
+              return;
+            }
+            openOnlineConfiguration("byok", workflow.provider || "OpenAI");
+            setMessage("先保存图片平台的接口地址、API Key 和模型；保存后会直接出现在这个图片节点。 ");
+          }}
+          onOpenPromptLibrary={() => setPromptLibraryTarget({ nodeId: activeAiNodeItem.id, kind: "ai" })}
         />
       )}
       {activeComfyApiNode && isComfyCanvasWorkflow(activeComfyApiNode.workflow) && (() => {
         const workflow = activeComfyApiNode.workflow;
         const visibleParameters = workflow.parameters.filter((parameter) => parameter.enabled && isBasicComfyParameter(parameter));
+        const latestDiagnostics = comfyDiagnostics[activeComfyApiNode.id] || [];
+        const latestErrors = latestDiagnostics.filter((diagnostic) => diagnostic.level === "error");
         const updatePackage = (next: ComfyCanvasWorkflow) => change((project) => ({ ...project, nodes: project.nodes.map((node) => node.id === activeComfyApiNode.id ? { ...node, workflow: next } : node) }));
         return <section className="comfy-node-parameter-panel" onPointerDown={(event) => event.stopPropagation()}>
           <header><div><span>COMFYUI WORKFLOW</span><b>{activeComfyApiNode.name}</b><small>参数只保存在当前画布节点；运行时写入工作流副本</small></div><button onClick={() => setActiveApiConfig(null)}>×</button></header>
@@ -4548,6 +7165,20 @@ const workflowId = project.links
             {parameter.kind === "boolean" ? <select value={String(workflow.values[parameter.id] ?? parameter.value)} onChange={(event) => updatePackage({ ...workflow, values: { ...workflow.values, [parameter.id]: event.target.value === "true" } })}><option value="true">开启</option><option value="false">关闭</option></select>
               : <input type={parameter.kind === "number" ? "number" : "text"} value={String(workflow.values[parameter.id] ?? parameter.value)} onChange={(event) => updatePackage({ ...workflow, values: { ...workflow.values, [parameter.id]: parameter.kind === "number" ? Number(event.target.value) : event.target.value } })} />}
           </label>) : <div className="comfy-node-parameter-empty">没有扫描到可编辑输入。请确认添加的是 ComfyUI API JSON；Workflow JSON 需要先在工作流库连接 ComfyUI并扫描转换。</div>}</div>
+          {latestDiagnostics.length > 0 && <section className={`comfy-parameter-diagnostics ${latestErrors.length ? "has-errors" : ""}`}>
+            <header><div><b>{latestErrors.length ? `${latestErrors.length} 项运行前错误` : "最近一次自动适配"}</b><small>来自当前连接的 ComfyUI object_info；修复后点击运行会重新扫描，不会沿用旧节点 ID。</small></div><button onClick={() => { setComfyDiagnostics((current) => ({ ...current, [activeComfyApiNode.id]: [] })); change((project) => ({ ...project, nodes: project.nodes.map((node) => node.id === activeComfyApiNode.id ? { ...node, validationErrors: withoutComfyValidationErrors(node.validationErrors) } : node) })); }}>清除记录</button></header>
+            <div>{latestDiagnostics.map((diagnostic, index) => {
+              const location = comfyDiagnosticLocation(diagnostic);
+              const type = diagnostic.expectedType || diagnostic.actualType;
+              return <article key={`${activeComfyApiNode.id}-${diagnostic.code || "diagnostic"}-${index}`} className={diagnostic.level}>
+                <b>{comfyDiagnosticTitle(diagnostic)}</b>
+                {location && <span>{location}</span>}
+                {type && <em>期望 {diagnostic.expectedType || "—"} / 实际 {diagnostic.actualType || "—"}</em>}
+                <p>{diagnostic.message}</p>
+                {diagnostic.level !== "info" && <small>如何修复：{comfyDiagnosticRepair(diagnostic)}</small>}
+              </article>;
+            })}</div>
+          </section>}
           <footer><span>{comfyConnected ? "● 本地 ComfyUI 已连接" : "○ 本地 ComfyUI 未连接"}</span><button onClick={() => void autoConnect()}>检测连接</button><button className="primary" onClick={() => void run(activeComfyApiNode.id)}>运行工作流</button></footer>
         </section>;
       })()}
@@ -4562,6 +7193,7 @@ const workflowId = project.links
             content: workflow,
             parameters: item.parameters?.length ? item.parameters : scanComfyParameters(workflow),
             values: {},
+            interface: item.interface,
           };
           addAtViewport("api", { name, workflow: packaged });
           setWorkflowLibraryOpen(false);
@@ -4571,8 +7203,8 @@ const workflowId = project.links
       <MediaLibrary key={`media-library-${historyId}`}
         open={mediaLibraryOpen}
         onClose={() => setMediaLibraryOpen(false)}
-        nodes={project.nodes}
-        onDeleteNode={(id) => change((p) => ({ ...p, nodes: p.nodes.filter((n) => n.id !== id), links: p.links.filter((l) => l.from !== id && l.to !== id) }))}
+        nodes={project.nodes.filter((node): node is NodeItem & { kind: Exclude<Kind, "annotation" | "annotationPointer"> } => node.kind !== "annotation" && node.kind !== "annotationPointer")}
+        onDeleteNode={(id) => deleteCanvasNodes([id])}
         onRenameNode={(id, name) => change((p) => ({ ...p, nodes: p.nodes.map((n) => n.id === id ? { ...n, name } : n) }))}
         onAddNode={(kind, pos, extra) => {
           const id = newId();
@@ -4587,7 +7219,7 @@ const workflowId = project.links
         projectId={historyId}
         open={directorOpen}
         onClose={() => setDirectorOpen(false)}
-        nodes={project.nodes}
+        nodes={project.nodes.filter((node): node is NodeItem & { kind: Exclude<Kind, "annotation" | "annotationPointer"> } => node.kind !== "annotation" && node.kind !== "annotationPointer")}
         onImportFiles={(files) => {
           const center = viewportCenter();
           files.forEach((file, index) => addDroppedMedia(file, { x: center.x + index * 34, y: center.y + index * 34 }));
@@ -4611,6 +7243,34 @@ const workflowId = project.links
           </div>
         </div>
       )}
+      {promptLibraryTarget && (() => {
+        const categories = ["全部", "正面提示词", "负面提示词", ...Array.from(new Set(promptLibraryEntries.map((entry) => entry.category).filter(Boolean)))];
+        const visible = promptLibraryEntries.filter((entry) =>
+          (promptLibraryFilter === "全部" || entry.category === promptLibraryFilter)
+          && `${entry.text} ${entry.category}`.toLowerCase().includes(promptLibrarySearch.trim().toLowerCase()),
+        );
+        const addEntry = () => {
+          const text = promptLibraryText.trim();
+          if (!text) return;
+          const category = promptLibraryCategory.trim() || "未分类";
+          const existing = promptLibraryEntries.find((entry) => entry.text === text && entry.category === category);
+          savePromptLibrary([existing || { id: newId(), text, category, createdAt: Date.now() }, ...promptLibraryEntries.filter((entry) => entry !== existing)]);
+          setPromptLibraryText("");
+          setPromptLibraryFilter(category);
+        };
+        return <div className="prompt-library-overlay" onPointerDown={(event) => { event.stopPropagation(); setPromptLibraryTarget(null); }}>
+          <section className="prompt-library-dialog" onPointerDown={(event) => event.stopPropagation()}>
+            <header><div><span>提示词库</span><b>收集、搜索并插入提示词</b><small>选择一条内容会写入当前 {promptLibraryTarget.kind === "video" ? "视频" : "创作"} 节点的提示词。</small></div><button title="关闭" onClick={() => setPromptLibraryTarget(null)}>×</button></header>
+            <div className="prompt-library-compose">
+              <textarea value={promptLibraryText} onChange={(event) => setPromptLibraryText(event.target.value)} placeholder="记录提示词：人物、画面、动作、镜头、风格或负面限制…" />
+              <div><input list="prompt-library-categories" value={promptLibraryCategory} onChange={(event) => setPromptLibraryCategory(event.target.value)} placeholder="分类，例如：正面提示词" /><datalist id="prompt-library-categories"><option value="正面提示词"/><option value="负面提示词"/><option value="镜头语言"/><option value="人物设定"/><option value="场景氛围"/></datalist><button className="primary" disabled={!promptLibraryText.trim()} onClick={addEntry}>保存到词库</button></div>
+            </div>
+            <div className="prompt-library-toolbar"><input value={promptLibrarySearch} onChange={(event) => setPromptLibrarySearch(event.target.value)} placeholder="搜索提示词或分类…" /> <div>{categories.map((category) => <button key={category} className={promptLibraryFilter === category ? "active" : ""} onClick={() => setPromptLibraryFilter(category)}>{category}</button>)}</div></div>
+            {promptLibraryFilter !== "全部" && <div className="prompt-library-rename"><span>当前分类：{promptLibraryFilter}</span><input value={promptLibraryCategory} onChange={(event) => setPromptLibraryCategory(event.target.value)} placeholder="输入新的分类名称"/><button onClick={() => { const renamed = promptLibraryCategory.trim(); if (!renamed || renamed === promptLibraryFilter) return; savePromptLibrary(promptLibraryEntries.map((entry) => entry.category === promptLibraryFilter ? { ...entry, category: renamed } : entry)); setPromptLibraryFilter(renamed); }}>重命名分类</button></div>}
+            <div className="prompt-library-list">{visible.length ? visible.map((entry) => <article key={entry.id}><button className="prompt-library-insert" title="写入当前节点提示词" onClick={() => insertPromptLibraryEntry(entry)}><b>{entry.category}</b><span>{entry.text}</span></button><button title="删除此提示词" className="danger" onClick={() => savePromptLibrary(promptLibraryEntries.filter((item) => item.id !== entry.id))}>×</button></article>) : <p>没有找到提示词。可先在上方输入内容并选择分类保存。</p>}</div>
+          </section>
+        </div>;
+      })()}
     </main>
   );
 }

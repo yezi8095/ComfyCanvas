@@ -1,4 +1,6 @@
-﻿* {
+@import "./ui/tokens.css";
+
+* {
   box-sizing: border-box;
 }
 html,
@@ -431,10 +433,41 @@ button,
 .provider-select-row button,.custom-provider-add button,.provider-model-discovery button { flex: none; border: 1px solid #50706c; border-radius: 7px; padding: 0 10px; background: #233b38; color: #a9eee1; }
 .custom-provider-add { display: flex; gap: 7px; }
 .custom-provider-add input { flex: 1; min-width: 0; }
-.provider-model-discovery { display: grid; grid-template-columns: max-content 1fr; align-items: center; gap: 9px; }
+.provider-model-discovery { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); align-items: center; gap: 9px; }
 .provider-model-discovery button { height: 34px; }
 .provider-model-discovery button:disabled { opacity: .45; cursor: default; }
 .provider-model-discovery small { color: #829895; font-size: 10px; line-height: 1.4; }
+.provider-test-button { border-color: #6b9b95 !important; background: #234743 !important; color: #d0fff5 !important; }
+.provider-test-result { border: 1px solid #496466; border-radius: 7px; padding: 9px 10px; font-size: 12px; line-height: 1.5; }
+.provider-test-result.success { border-color: #4f9488; background: #18312d; color: #b9f2e7; }
+.provider-test-result.error { border-color: #9b695d; background: #352321; color: #ffd2c8; }
+.provider-model-choice-note { color: #829895; font-size: 10px; line-height: 1.45; }
+.provider-model-library { display: grid; gap: 8px; border: 1px solid #3e4b48; border-radius: 9px; padding: 10px; background: #111513; }
+.provider-model-library > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.provider-model-library > header > div { display: grid; gap: 2px; }
+.provider-model-library > header b { color: #e1d4c0; font-size: 12px; }
+.provider-model-library > header small { color: #8e8272; font-size: 9px; }
+.provider-model-library > header > button,.provider-model-edit-row > button { flex: none; min-height: 34px; border: 1px solid #765f3e; border-radius: 7px; padding: 0 11px; background: #2a2117; color: #e6c58d; cursor: pointer; }
+.provider-model-library > header > button:hover,.provider-model-edit-row > button:hover:not(:disabled) { border-color: #b1905d; background: #382a1b; }
+.provider-model-edit-row { display: flex; gap: 8px; }
+.provider-model-edit-row > input { min-width: 0; flex: 1; }
+.provider-model-edit-row > button:disabled { cursor: default; opacity: .4; }
+.provider-model-library-list { display: grid; max-height: 190px; gap: 6px; overflow-y: auto; scrollbar-width: thin; }
+.provider-model-library-list > article { display: flex; align-items: center; gap: 8px; border: 1px solid #3b3932; border-radius: 7px; padding: 5px; background: #0d0d0b; }
+.provider-model-library-list > article.active { border-color: #8f754f; background: #1b1610; }
+.provider-model-library-main { display: grid; min-width: 0; flex: 1; gap: 2px; overflow: hidden; border: 0; padding: 4px 6px; background: transparent; color: #e2d5c1; cursor: pointer; text-align: left; }
+.provider-model-library-main b,.provider-model-library-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-model-library-main b { font-size: 11px; }.provider-model-library-main small { color: #9c8e78; font-size: 9px; }
+.provider-model-library-list > article > div { display: flex; flex: none; gap: 5px; }
+.provider-model-library-list > article > div button { border: 1px solid #544835; border-radius: 5px; padding: 5px 7px; background: #211b14; color: #bba98d; cursor: pointer; font-size: 9px; }
+.provider-model-library-list > article > div button.default { border-color: #806b49; color: #e0c28e; cursor: default; }
+.provider-model-library-list > article > div button.remove { border-color: #614039; color: #d6a098; }
+.provider-model-library-empty { border: 1px dashed #4a4338; border-radius: 7px; padding: 10px; color: #948673; font-size: 10px; line-height: 1.5; }
+.provider-model-capabilities { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; border: 1px solid #344945; border-radius: 8px; padding: 9px 11px; background: #111918; }
+.provider-model-capabilities > span { color: #a9b9b5; font-size: 11px; }
+.provider-model-capabilities > label { display: inline-flex; flex-direction: row; align-items: center; gap: 5px; color: #d4dfdc; font-size: 11px; }
+.provider-model-capabilities input { width: 14px; height: 14px; margin: 0; accent-color: #b99b62; }
+.provider-model-capabilities > small { flex-basis: 100%; color: #829895; font-size: 9px; line-height: 1.45; }
 .detected-model-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
 .detected-model-summary span { border: 1px solid #496662; border-radius: 99px; padding: 4px 8px; background: #1b2b29; color: #a9d9d0; font-size: 10px; }
 .detected-model-summary span.video { color: #f2d187; border-color: #71613d; }
@@ -608,9 +641,11 @@ button,
 .ai-composer.ai-console.prompt-expanded .ai-console-prompt { min-height: calc(100vh - 190px); max-height: none; resize: none; font-size: 14px; line-height: 1.75; }
 .ai-mention-menu { position: absolute; z-index: 20; top: 58px; left: 62px; display: grid; width: 330px; max-height: 330px; gap: 4px; overflow-y: auto; border: 1px solid #536c68; border-radius: 10px; padding: 10px; background: #162020fa; box-shadow: 0 18px 42px #000e; }
 .ai-mention-menu > b { color: #e4efec; font-size: 11px; }.ai-mention-menu > small { color: #748783; font-size: 8px; }
+.ai-mention-menu > .ai-mention-error { border: 1px solid #8e4f43; border-radius: 6px; padding: 7px 8px; background: #301815; color: #f2b9ad; font-size: 9px; line-height: 1.5; }
 .ai-mention-menu > div { display: grid; gap: 5px; margin-top: 3px; }
 .ai-mention-menu > div > button { display: grid; grid-template-columns: 44px 1fr; align-items: center; gap: 8px; border: 1px solid #344a49; border-radius: 7px; padding: 5px; background: #11191a; color: #cbd8d5; cursor: pointer; text-align: left; }
 .ai-mention-menu > div > button:hover { border-color: #7d67a0; background: #251e2e; }
+.ai-mention-menu > div > button:disabled { cursor: wait; opacity: .55; }
 .ai-mention-menu img { width: 44px; height: 38px; border-radius: 4px; object-fit: cover; }.ai-mention-menu span { display: grid; gap: 2px; font-size: 10px; }.ai-mention-menu span small { overflow: hidden; color: #728582; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .ai-recognition-panel { position: absolute; z-index: 24; right: 18px; bottom: 57px; display: grid; box-sizing: border-box; width: min(650px, calc(100vw - 120px)); height: min(500px, calc(100vh - 150px)); grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 1px solid #6d5a7c; border-radius: 13px; background: #222526fc; box-shadow: 0 22px 54px #000e; }
 .ai-recognition-panel > header { display: flex; align-items: center; gap: 9px; border-bottom: 1px solid #3d4444; padding: 11px 12px; }.ai-recognition-panel > header > img { width: 46px; height: 42px; border-radius: 6px; object-fit: cover; }.ai-recognition-panel > header > div { display: grid; flex: 1; gap: 2px; }.ai-recognition-panel > header b { color: #f0e7f5; font-size: 12px; }.ai-recognition-panel > header small { color: #7f8e8b; font-size: 8px; }.ai-recognition-panel > header > button { width: 25px; height: 25px; border: 1px solid #4b595a; border-radius: 50%; background: transparent; color: #a9b6b3; cursor: pointer; font-size: 16px; }
@@ -621,6 +656,8 @@ button,
 .ai-console-negative { width: 100%; height: 30px !important; margin: -3px 0 5px; border-color: #384849 !important; background: #141a1b !important; color: #9ca8a6 !important; }
 .ai-consolebar { display: flex; min-width: 0; align-items: center; gap: 5px; border-top: 1px solid #303d3e; padding-top: 9px; }
 .ai-consolebar select { width: auto; max-width: 150px; height: 30px; flex: 0 1 auto; border: 0; padding: 0 5px; background: transparent; color: #d8e1df; cursor: pointer; font: 10px "Microsoft YaHei UI", sans-serif; }
+.ai-consolebar .ai-configure-button { height: 28px; flex: 0 0 auto; border: 1px solid #917957; border-radius: 6px; padding: 0 9px; background: #2a2118; color: #edd8b8; cursor: pointer; font: 10px "Microsoft YaHei UI", sans-serif; }
+.ai-consolebar .ai-configure-button:hover { border-color: #e2bd7f; background: #382a1d; }
 .ai-consolebar .ai-comfy-workflow-select { max-width: 220px; color: #93dfd1; }
 .ai-console-parameters label > small { overflow: hidden; color: #647875; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .ai-console-summary { min-width: 0; max-width: 310px; overflow: hidden; border: 0; border-radius: 6px; padding: 7px 6px; background: transparent; color: #cbd5d3; cursor: pointer; font: 10px "Microsoft YaHei UI", sans-serif; text-overflow: ellipsis; white-space: nowrap; }
@@ -639,6 +676,18 @@ button,
 .ai-console-parameters label { min-width: 0; }.ai-console-parameters .wide { grid-column: 1 / -1; }
 .ai-console-parameters input,.ai-console-parameters select { width: 100%; }
 .ai-parameter-source { display: flex; align-items: center; gap: 6px; border-top: 1px solid #394343; padding-top: 8px; color: #9fadaa; font-size: 10px; }.ai-parameter-source small { margin-left: auto; color: #6f7e7b; }
+.ai-storyboard-frame-list { display: grid; gap: 8px; }
+.ai-storyboard-frame-list > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ai-storyboard-frame-list > header > div { display: grid; gap: 2px; }
+.ai-storyboard-frame-list > header b { color: #e3ecea; font-size: 11px; }
+.ai-storyboard-frame-list > header small { color: #778582; font-size: 9px; }
+.ai-storyboard-frame-list button { border: 1px solid #6b5b44; border-radius: 6px; padding: 6px 9px; background: #2a2118; color: #e6c997; cursor: pointer; font: 10px "Microsoft YaHei UI", sans-serif; }
+.ai-storyboard-frame-list button:disabled { cursor: default; opacity: .4; }
+.ai-storyboard-frame-list > article { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; border: 1px solid #4d4135; border-radius: 9px; padding: 9px; background: #17130f; }
+.ai-storyboard-frame-list > article > .wide { grid-column: 1 / -1; }
+.ai-storyboard-frame-heading { display: flex; grid-column: 1 / -1; align-items: center; justify-content: space-between; }
+.ai-storyboard-frame-heading strong { color: #d9bd8f; font-size: 11px; }
+.ai-storyboard-frame-heading button { border-color: #65473d; background: #2a1814; color: #dcae9f; padding: 4px 8px; }
 @media (max-width: 760px) { .ai-composer.ai-console { width: calc(100vw - 30px); }.ai-consolebar { flex-wrap: wrap; }.ai-console-summary { max-width: 220px; }.ai-console-parameters { right: 8px; width: calc(100vw - 46px); } }
 
 /* Keep the AI video workbench on the same compact console system. */
@@ -814,6 +863,51 @@ button,
 .node.api.status-error {
   animation: api-error 0.32s ease-in-out 2;
 }
+.node.api.validation-error {
+  border-color: #d86458 !important;
+  box-shadow: 0 0 0 1px #d8645870, 0 16px 34px #150606cc;
+}
+.app .node.validation-error {
+  border-color: var(--cc-status-error, #d86458) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--cc-status-error, #d86458) 46%, transparent), 0 16px 34px #150606cc;
+}
+.workflow-validation {
+  position: absolute;
+  z-index: 22;
+  top: calc(100% + 7px);
+  left: 0;
+  width: max-content;
+  max-width: 340px;
+  display: grid;
+  gap: 3px;
+  padding: 7px 9px;
+  border: 1px solid #a94f47;
+  border-radius: 7px;
+  background: #291211f4;
+  color: #ffd1c8;
+  font: 10px/1.45 "Microsoft YaHei UI", sans-serif;
+  box-shadow: 0 10px 26px #000b;
+  pointer-events: none;
+}
+.workflow-validation span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app .node-validation-badge {
+  position: absolute;
+  z-index: 24;
+  top: 33px;
+  right: 7px;
+  max-width: calc(100% - 14px);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--cc-status-error, #ca7167) 72%, #2e1712) !important;
+  border-radius: 5px;
+  background: #2b1512 !important;
+  box-shadow: 0 7px 18px #000a;
+  color: #ffd5c9 !important;
+  font-size: 9px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
 .node:hover {
   border-color: #6a8e8e;
 }
@@ -891,7 +985,15 @@ button,
   border: 0;
   border-radius: 0;
   box-shadow: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  cursor: grab;
 }
+.node.image:active img,
+.node.image:active video,
+.node.video:active img,
+.node.video:active video { cursor: grabbing; }
 .node audio {
   width: calc(100% - 22px);
   margin: 34px 11px;
@@ -1194,16 +1296,19 @@ button,
   border-radius: 50%;
   background: #82d9cb;
   box-shadow: 0 0 0 2px #162021;
+  /* 连接点默认隐藏，但保留一个比圆点更大的透明热区。这样画布缩小
+     后不会满屏都是端口，鼠标靠近节点左右边缘时仍能轻松找到它。 */
   opacity: 0;
-  pointer-events: none;
+  pointer-events: auto;
   transition:
     opacity 0.15s ease,
     transform 0.15s ease;
 }
-.node:hover .port,
-.node.selected .port {
-  opacity: 1;
-  pointer-events: auto;
+.port::before {
+  content: "";
+  position: absolute;
+  inset: -85%;
+  border-radius: 50%;
 }
 .port.in {
   left: -8px;
@@ -1211,7 +1316,10 @@ button,
 .port.out {
   right: -8px;
 }
-.port:hover {
+.port:hover,
+.port:active,
+.port:focus-visible {
+  opacity: 1;
   background: #ecfffa;
   transform: scale(1.45);
 }
@@ -2438,6 +2546,7 @@ button,
 .online-video-consolebar:has(.cloud-points-estimate) .online-video-generate { margin-left: 0; }
 .online-video-consolebar .online-video-generate span { font-size: 14px; opacity: .7; }
 .online-video-consolebar .online-video-generate:hover { background: #f1f4f3; }
+.online-video-consolebar .online-video-generate:disabled { border-color: #574b3b; background: #211b14; color: #9c8c74; cursor: not-allowed; opacity: .72; }
 .online-video-composer.compact .online-video-chipbar { gap: 4px; overflow: hidden; }
 .online-video-composer.compact .online-video-chipbar button { padding: 5px 6px; font-size: 10px; }
 .online-video-composer.compact .online-video-prompt { min-height: 84px; }
@@ -2457,31 +2566,34 @@ button,
   height: 100%;
   object-fit: cover;
   background: transparent;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.canvas-video-load-error {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 12px;
+  z-index: 2;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--danger, #b45d4f) 70%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, #160c09 88%, transparent);
+  color: #f1c7bb;
+  font: 12px/1.4 "Microsoft YaHei UI", sans-serif;
+  pointer-events: none;
 }
 .canvas-video-tools {
   position: absolute;
-  right: 10px;
+  right: 11px;
   bottom: 9px;
-  left: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: block;
   color: #efffff;
   opacity: .5;
   transition: opacity .18s ease;
-  pointer-events: auto;
+  pointer-events: none;
 }
 .canvas-video-player:hover .canvas-video-tools { opacity: 1; }
-.canvas-video-actions { display: flex; gap: 8px; }
-.canvas-video-actions button {
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  color: #efffff;
-  font-size: 15px;
-  line-height: 22px;
-  text-shadow: 0 1px 3px #000b;
-}
 .canvas-video-tools time {
   color: #efffff;
   font: 11px/22px "Microsoft YaHei UI", sans-serif;
@@ -4239,6 +4351,70 @@ button,
   min-width: 0;
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+   Obsidian UI refresh
+   Calm black surfaces, restrained mint feedback, and content-first cards.
+   This block intentionally sits last so legacy component rules continue to
+   provide layout while the visual language stays consistent across the app.
+   ────────────────────────────────────────────────────────────────────────── */
+.app.theme-obsidian { --ui-bg: #050505; --ui-panel: #0c0c0d; --ui-panel-hi: #121214; --ui-field: #09090a; --ui-line: #292a2c; --ui-line-soft: #1d1e20; --ui-text: #f2f3f3; --ui-muted: #8d9296; --ui-faint: #5d6267; --ui-accent: #85ddcc; --ui-accent-soft: #13302c; --ui-shadow: #000000b8; }
+.app.theme-graphite { --ui-bg: #090909; --ui-panel: #111112; --ui-panel-hi: #18181a; --ui-field: #0c0c0d; --ui-line: #353638; --ui-line-soft: #242527; --ui-text: #f5f5f5; --ui-muted: #a1a3a6; --ui-faint: #6f7377; --ui-accent: #9ee7da; --ui-accent-soft: #173632; --ui-shadow: #000000a8; }
+.app.theme-midnight { --ui-bg: #050608; --ui-panel: #0b0e11; --ui-panel-hi: #11161a; --ui-field: #080a0c; --ui-line: #293138; --ui-line-soft: #182027; --ui-text: #f1f5f5; --ui-muted: #8f9aa0; --ui-faint: #5d6970; --ui-accent: #8bd9dc; --ui-accent-soft: #102f32; --ui-shadow: #000000c2; }
+
+html, body, #root { background: #050505; color: #f2f3f3; }
+.app { background: var(--ui-bg); color: var(--ui-text); }
+.app::before { content: ""; position: absolute; z-index: 0; inset: 0; pointer-events: none; background: radial-gradient(900px 520px at 48% -25%, color-mix(in srgb, var(--ui-accent) 8%, transparent), transparent 62%), linear-gradient(180deg, #ffffff03, transparent 18%); }
+
+.topbar { height: 68px; padding: 0 24px; border-bottom: 1px solid var(--ui-line-soft); background: linear-gradient(180deg, #070707f4, #070707dd 78%, #07070700); backdrop-filter: blur(18px); }
+.brand { gap: 11px; }.brand b { font-size: 16px; font-weight: 650; letter-spacing: .035em; }.brand span { color: var(--ui-muted); font-size: 11px; }
+.connection-dot { width: 7px; height: 7px; box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 8%, transparent), 0 0 12px currentColor; }
+.connection-dot.connected { color: var(--ui-accent); background: var(--ui-accent); }.connection-dot.disconnected { color: #d67575; background: #d67575; }
+.top-actions { gap: 8px; }.top-actions button, .top-actions .button { border: 1px solid var(--ui-line); border-radius: 8px; padding: 8px 12px; background: #ffffff04; color: #d8dcdd; font-size: 11px; }
+.top-actions button:hover, .top-actions .button:hover { border-color: color-mix(in srgb, var(--ui-accent) 62%, var(--ui-line)); background: var(--ui-accent-soft); color: #edfffb; transform: translateY(-1px); }
+.top-actions button:nth-last-child(2) { border-color: color-mix(in srgb, var(--ui-accent) 55%, var(--ui-line)); color: var(--ui-accent); }
+.top-menu, .settings { border-color: var(--ui-line); border-radius: 12px; background: color-mix(in srgb, var(--ui-panel) 94%, transparent); box-shadow: 0 22px 60px var(--ui-shadow); backdrop-filter: blur(20px); }
+.top-menu { width: 164px; padding: 7px; }.top-menu button:hover, .top-menu .button:hover { background: #ffffff0a; color: var(--ui-accent); }
+.settings { top: 70px; right: 24px; padding: 16px; color: var(--ui-text); }.settings input { border-color: var(--ui-line); border-radius: 8px; background: var(--ui-field); }
+.setting-row, .settings small { color: var(--ui-muted); }.setting-path button, .theme-options button, .log-button { border-color: var(--ui-line); border-radius: 7px; background: #ffffff05; }
+.theme-options button.active { border-color: var(--ui-accent); background: var(--ui-accent-soft); color: #ddfff8; }
+
+.studio-sidebar { width: 260px; padding: 82px 15px 16px; border-right-color: var(--ui-line-soft); background: linear-gradient(180deg, #090909f3, #070707e8); box-shadow: 18px 0 45px #0008; backdrop-filter: blur(16px); }
+.canvas { background-color: var(--ui-bg) !important; background-image: radial-gradient(color-mix(in srgb, var(--ui-faint) 66%, transparent) .72px, transparent .85px) !important; background-size: 30px 30px !important; }
+.wires path { stroke: #596265; stroke-width: 1.25; opacity: .7; }.wires path.active { stroke: var(--ui-accent); filter: drop-shadow(0 0 4px color-mix(in srgb, var(--ui-accent) 70%, transparent)); opacity: 1; }
+
+.node { border-color: var(--ui-line); border-radius: 12px; background: var(--ui-panel); box-shadow: 0 14px 34px #0008; overflow: visible; }
+.node:hover { border-color: color-mix(in srgb, var(--ui-muted) 55%, var(--ui-line)); }.node.selected { outline: 1px solid var(--ui-accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ui-accent) 8%, transparent), 0 20px 48px #000b; }
+.node-head { border-radius: 11px 11px 0 0; background: #ffffff06; border-bottom: 1px solid var(--ui-line-soft); }.node-head span { color: var(--ui-accent); }
+.node.aiText, .node.aiImage, .node.onlineVideo { border-color: var(--ui-line); background: var(--ui-panel); box-shadow: 0 16px 36px #000a; }.node.aiText.selected, .node.aiImage.selected, .node.onlineVideo.selected { border-color: var(--ui-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-accent) 8%, transparent), 0 20px 45px #000b; }
+.port { border-color: #07100f; background: var(--ui-accent); box-shadow: 0 0 0 3px var(--ui-panel), 0 0 14px color-mix(in srgb, var(--ui-accent) 45%, transparent); }
+.node .resize-handle { opacity: .55; }
+
+.ai-generation-node, .node.onlineVideo .online-video-trigger.ai-generation-node { background: #0a0a0b; }.ai-generation-node-empty, .ai-generation-node.picture .ai-generation-node-empty, .ai-generation-node.video .ai-generation-node-empty { background: radial-gradient(circle at 50% 34%, color-mix(in srgb, var(--ui-accent) 10%, transparent), transparent 43%), #0a0a0b; }
+.ai-generation-node-empty > span, .ai-generation-node.picture .ai-generation-node-empty > span, .ai-generation-node.video .ai-generation-node-empty > span { border-color: color-mix(in srgb, var(--ui-accent) 55%, var(--ui-line)); background: var(--ui-accent-soft); color: var(--ui-accent); border-radius: 10px; }.ai-generation-node-empty b { font-weight: 650; letter-spacing: .02em; }.ai-generation-node-empty small { color: var(--ui-muted); }
+
+.ai-composer, .ai-composer.ai-console, .online-video-composer.online-video-unified-console { border-color: var(--ui-line); border-radius: 16px; background: color-mix(in srgb, var(--ui-panel) 95%, transparent); box-shadow: 0 28px 80px #000d; color: var(--ui-text); backdrop-filter: blur(20px); }
+.ai-composer.script, .ai-composer.picture { border-color: var(--ui-line); }.ai-console-close, .online-video-console-close { border-color: var(--ui-line); background: #ffffff05; color: var(--ui-muted); }.ai-console-close:hover, .online-video-console-close:hover { border-color: var(--ui-accent); color: var(--ui-accent); }
+.ai-console-add { border-color: #3c5660; border-radius: 9px; background: #131c21; color: #c8dafe; }.ai-console-add.mint { border-color: color-mix(in srgb, var(--ui-accent) 55%, var(--ui-line)); background: var(--ui-accent-soft); color: var(--ui-accent); }
+.ai-console-tools > small, .ai-reference-status, .ai-composer-title small, .ai-parameter-heading small { color: var(--ui-muted) !important; }
+.ai-console-prompt { color: var(--ui-text); }.ai-console-prompt::placeholder { color: var(--ui-faint); }.ai-consolebar, .online-video-unified-console .online-video-consolebar { border-top-color: var(--ui-line-soft); }
+.ai-consolebar select, .online-video-consolebar select { color: #d8dcdd; }.ai-console-summary { color: #c4c9ca; }.ai-console-summary:hover, .ai-console-icon:hover { color: var(--ui-accent); background: color-mix(in srgb, var(--ui-accent) 9%, transparent); }
+.ai-console-parameters, .online-video-popover, .ai-recognition-panel, .ai-mention-menu, .ai-text-canvas-picker { border-color: var(--ui-line); background: var(--ui-panel-hi); box-shadow: 0 22px 65px #000d; }
+.ai-console-parameters input, .ai-console-parameters select, .ai-composer input, .ai-composer select, .ai-composer textarea { border-color: var(--ui-line); background: var(--ui-field); color: var(--ui-text); }
+.ai-generate-button { border-color: var(--ui-accent); border-radius: 9px; background: var(--ui-accent); color: #07100f; box-shadow: 0 5px 18px color-mix(in srgb, var(--ui-accent) 16%, transparent); }.ai-generate-button:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); }
+.ai-prompt-library-button, .ai-at-image-button, .ai-prompt-expand { border-color: var(--ui-line); background: #ffffff05; color: #c8cfce; }.ai-prompt-library-button:hover, .ai-at-image-button:hover, .ai-prompt-expand:hover { border-color: var(--ui-accent); color: var(--ui-accent); }
+
+.online-provider-backdrop, .workflow-library-backdrop, .canvas-shortcuts-backdrop { background: #000000bd; backdrop-filter: blur(11px); }
+.online-provider-dialog, .workflow-library, .canvas-shortcuts-dialog { border-color: var(--ui-line); border-radius: 16px; background: var(--ui-panel); box-shadow: 0 30px 90px #000e; }
+.online-provider-dialog input, .online-provider-dialog select, .workflow-library-toolbar input, .workflow-library-toolbar select, .workflow-library-body > main textarea, .workflow-library-body > main label > input { border-color: var(--ui-line); background: var(--ui-field); color: var(--ui-text); }
+.online-provider-dialog header span, .workflow-library > header span { color: var(--ui-accent); }.online-provider-dialog footer button.primary, .workflow-library button.primary { border-color: var(--ui-accent); background: var(--ui-accent-soft); color: #d7fff7; }
+.provider-test-result.success { border-color: color-mix(in srgb, var(--ui-accent) 50%, var(--ui-line)); background: var(--ui-accent-soft); color: #d3fff6; }.provider-test-result.error { border-color: #704743; background: #271817; color: #ffc9c2; }
+.workflow-library-body, .workflow-library-body > aside { border-color: var(--ui-line-soft); background: #09090a; }.workflow-library-body > aside > button.active { border-color: color-mix(in srgb, var(--ui-accent) 45%, var(--ui-line)); background: var(--ui-accent-soft); }.workflow-library-body > aside > button:hover { background: #ffffff08; }
+
+.media-lib-overlay, .director-overlay { background: #050505 !important; }.media-lib-panel, .director-shell { border-color: var(--ui-line) !important; background: var(--ui-panel) !important; box-shadow: 0 26px 80px #000d; }.media-lib-panel header, .director-shell .director-topbar { border-color: var(--ui-line-soft) !important; background: #ffffff03 !important; }.media-lib-card, .director-shell .director-asset-card { border-color: var(--ui-line) !important; background: #0a0a0b !important; }.media-lib-card:hover, .director-shell .director-asset-card:hover { border-color: var(--ui-accent) !important; }.director-shell .director-stage, .director-shell .director-preview-wrap, .director-shell .director-timeline { background: #070708 !important; border-color: var(--ui-line-soft) !important; }.director-shell .director-assets, .director-shell .director-script { background: #0a0a0b !important; border-color: var(--ui-line-soft) !important; }
+
+input, select, textarea { caret-color: var(--ui-accent); } ::selection { background: color-mix(in srgb, var(--ui-accent) 34%, transparent); color: #fff; }
+::-webkit-scrollbar { width: 9px; height: 9px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 99px; background: #5d626780; background-clip: padding-box; } ::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--ui-accent) 62%, #5d6267); }
+
 /* 竖屏剪辑预览严格使用 9:16 画框，原素材在框内完整显示。 */
 .director-shell .director-preview.is-portrait {
   width: auto;
@@ -4247,4 +4423,1834 @@ button,
   max-height: 100%;
   min-height: 0;
   aspect-ratio: 9 / 16;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Signal Atelier — global visual system
+   Functional layout stays untouched; this final layer only normalizes the
+   app into a quiet black, precision-tool visual language.
+   ────────────────────────────────────────────────────────────────────────── */
+.app.theme-obsidian,
+.app.theme-graphite,
+.app.theme-midnight {
+  --ui-bg: #070708;
+  --ui-panel: #101113;
+  --ui-panel-hi: #161719;
+  --ui-field: #0b0c0e;
+  --ui-line: #35383b;
+  --ui-line-soft: #24272a;
+  --ui-text: #e8eaeb;
+  --ui-muted: #979da1;
+  --ui-faint: #62696e;
+  --ui-accent: #7fc8ca;
+  --ui-accent-soft: #102629;
+  --ui-amber: #d5a84b;
+  --ui-shadow: #000000cc;
+}
+
+html, body, #root,
+button, input, select, textarea {
+  font-family: "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", "Segoe UI", sans-serif;
+}
+
+.app { background: var(--ui-bg); }
+.app::before { background: linear-gradient(180deg, #ffffff02, transparent 120px); }
+
+.topbar {
+  height: 62px;
+  padding: 0 22px;
+  border-bottom-color: var(--ui-line);
+  background: #090a0b;
+  backdrop-filter: none;
+}
+.brand { gap: 9px; }
+.brand b { font-size: 15px; font-weight: 600; letter-spacing: .09em; }
+.brand span { font-size: 10px; letter-spacing: .035em; }
+.connection-dot { width: 6px; height: 6px; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 9%, transparent); }
+.top-actions button, .top-actions .button,
+.top-menu, .settings,
+.setting-path button, .theme-options button, .log-button {
+  border-radius: 4px;
+}
+.top-actions button, .top-actions .button {
+  padding: 7px 10px;
+  border-color: var(--ui-line);
+  background: #121315;
+  color: var(--ui-text);
+}
+.top-actions button:hover, .top-actions .button:hover {
+  transform: none;
+  border-color: var(--ui-accent);
+  background: var(--ui-accent-soft);
+}
+.top-menu, .settings {
+  border-color: var(--ui-line);
+  background: #111214;
+  box-shadow: 0 18px 46px var(--ui-shadow);
+  backdrop-filter: none;
+}
+
+.studio-sidebar {
+  width: 250px;
+  border-right-color: var(--ui-line);
+  background: #0a0b0c;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.canvas {
+  background-color: #08090a !important;
+  background-image: radial-gradient(#69717688 .62px, transparent .78px) !important;
+  background-size: 40px 40px !important;
+}
+.wires path { stroke: #71787c; stroke-width: 1.05; opacity: .66; }
+.wires path.active { stroke: var(--ui-accent); filter: drop-shadow(0 0 2px #7fc8ca80); }
+
+.node,
+.node.aiText, .node.aiImage, .node.onlineVideo {
+  border-color: #3a3e41;
+  border-radius: 5px;
+  background: #101113;
+  box-shadow: 0 14px 30px #000a;
+}
+.node:hover { border-color: #777e82; }
+.node.selected,
+.node.aiText.selected, .node.aiImage.selected, .node.onlineVideo.selected {
+  outline: 1px solid #8bd3d4;
+  outline-offset: 2px;
+  border-color: #6aafb1;
+  box-shadow: 0 15px 34px #000c;
+}
+.node-head {
+  border-radius: 4px 4px 0 0;
+  border-bottom-color: #2c3033;
+  background: #17191a;
+}
+.port { border-color: #090a0b; background: var(--ui-accent); box-shadow: 0 0 0 3px #101113; }
+
+.ai-generation-node,
+.ai-generation-node-empty,
+.ai-generation-node.picture .ai-generation-node-empty,
+.ai-generation-node.video .ai-generation-node-empty {
+  background: #0d0e10;
+}
+.ai-generation-node-empty > span,
+.ai-generation-node.picture .ai-generation-node-empty > span,
+.ai-generation-node.video .ai-generation-node-empty > span {
+  border-color: #548f93;
+  border-radius: 6px;
+  background: #10292c;
+  color: #b9e2e2;
+}
+.ai-generation-running { border-radius: 3px; background: #282014; color: #ead18a; }
+
+.ai-composer, .ai-composer.ai-console,
+.online-video-composer.online-video-unified-console {
+  border-color: #3a3e41;
+  border-radius: 6px;
+  background: #111214;
+  box-shadow: 0 26px 60px #000d;
+  backdrop-filter: none;
+}
+.ai-console-close, .online-video-console-close {
+  border-radius: 4px;
+  background: #17191a;
+}
+.ai-console-add, .ai-console-add.mint { border-radius: 4px; }
+.ai-console-prompt { font-size: 14px; line-height: 1.72; }
+.ai-consolebar, .online-video-unified-console .online-video-consolebar { border-top-color: #303438; }
+.ai-console-parameters, .online-video-popover, .ai-recognition-panel,
+.ai-mention-menu, .ai-text-canvas-picker {
+  border-color: #3a3e41;
+  border-radius: 5px;
+  background: #151719;
+  box-shadow: 0 20px 46px #000d;
+}
+.ai-console-parameters input, .ai-console-parameters select,
+.ai-composer input, .ai-composer select, .ai-composer textarea,
+.online-provider-dialog input, .online-provider-dialog select,
+.workflow-library-toolbar input, .workflow-library-toolbar select,
+.workflow-library-body > main textarea, .workflow-library-body > main label > input {
+  border-color: #3a3e41;
+  border-radius: 4px;
+  background: #0b0c0e;
+}
+.ai-generate-button {
+  border-color: #d7dcdd;
+  border-radius: 4px;
+  background: #e0e3e3;
+  color: #111315;
+  box-shadow: none;
+}
+.ai-generate-button:hover:not(:disabled) { filter: brightness(.93); transform: none; }
+.ai-prompt-library-button, .ai-at-image-button, .ai-prompt-expand {
+  border-radius: 4px;
+  background: #15191a;
+}
+
+.online-provider-dialog, .workflow-library, .canvas-shortcuts-dialog {
+  border-color: #3a3e41;
+  border-radius: 6px;
+  background: #111214;
+  box-shadow: 0 28px 68px #000e;
+}
+.online-provider-dialog footer button.primary, .workflow-library button.primary {
+  border-color: #558f91;
+  border-radius: 4px;
+  background: #142d30;
+  color: #d4f0ef;
+}
+.provider-test-result.success { border-radius: 4px; }
+
+.points-balance-card,
+.points-package-grid button,
+.points-simulator button {
+  border-radius: 4px;
+}
+.points-balance-card > button,
+.points-package-grid button,
+.points-simulator button { box-shadow: none; }
+.points-balance-card .points-value,
+.points-cost, .credit-cost, .credit-amount { color: var(--ui-amber); }
+
+.media-lib-overlay, .director-overlay { background: #070809 !important; }
+.media-lib-panel, .director-shell {
+  border-color: #383c3f !important;
+  border-radius: 5px !important;
+  background: #0d0e10 !important;
+  box-shadow: none;
+}
+.media-lib-panel header, .director-shell .director-topbar {
+  background: #141617 !important;
+  border-color: #303438 !important;
+}
+.media-lib-card, .director-shell .director-asset-card {
+  border-radius: 4px !important;
+  background: #111315 !important;
+}
+.director-shell .director-stage, .director-shell .director-preview-wrap,
+.director-shell .director-timeline { background: #08090a !important; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { border-radius: 4px; background-color: #646b6f80; }
+::-webkit-scrollbar-thumb:hover { background-color: #8a9498; }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Noir editorial / warm cinema system
+   Reference: warm ivory type, near-black brown surfaces, hairline brass
+   framing and a single quiet mint status colour.  No product behaviour here.
+   ────────────────────────────────────────────────────────────────────────── */
+.app.theme-obsidian,
+.app.theme-graphite,
+.app.theme-midnight {
+  --ui-bg: var(--cc-black);
+  --ui-panel: var(--cc-surface);
+  --ui-panel-hi: var(--cc-surface-raised);
+  --ui-field: var(--cc-field);
+  --ui-line: var(--cc-border);
+  --ui-line-soft: var(--cc-line-soft);
+  --ui-text: var(--cc-text);
+  --ui-muted: var(--cc-text-muted);
+  --ui-faint: var(--cc-text-faint);
+  --ui-accent: var(--cc-gold);
+  --ui-accent-soft: var(--cc-gold-soft);
+  --ui-amber: var(--cc-gold-strong);
+  --ui-shadow: var(--cc-shadow);
+}
+html, body, #root,
+button, input, select, textarea {
+  font-family: "Noto Serif SC", "Songti SC", "STSong", "SimSun", serif;
+  letter-spacing: .018em;
+}
+.app { background: #090807; }
+.app::before {
+  background: radial-gradient(780px 420px at 50% 0%, #c6a07108, transparent 66%), linear-gradient(180deg, #ffffff02, transparent 118px);
+}
+.topbar { background: #0a0908; border-bottom-color: #373129; }
+.brand b { color: #f1dfc2; font-family: "Noto Serif SC", "Songti SC", serif; font-size: 17px; letter-spacing: .13em; }
+.brand span { color: #a99b88; }
+.connection-dot { background: var(--ui-accent) !important; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-accent) 12%, transparent); }
+.top-actions button, .top-actions .button { border-color: transparent; background: transparent; color: #ddcfbb; }
+.top-actions button:hover, .top-actions .button:hover { border-color: #5a5044; background: #17130f; color: #fff0d8; }
+.top-actions button:nth-last-child(2), .top-actions .button.primary {
+  border-color: #ebd9c0; background: #f0deca; color: #2a2119;
+}
+.top-menu, .settings { background: #12100e; border-color: #484036; }
+.studio-sidebar { background: #0b0a09; border-right-color: #302b25; }
+.canvas {
+  background-color: #0a0908 !important;
+  background-image: radial-gradient(#70675a77 .58px, transparent .74px) !important;
+  background-size: 42px 42px !important;
+}
+.wires path { stroke: #756b5e; opacity: .62; }
+.wires path.active { stroke: #bca174; filter: drop-shadow(0 0 2px #bca17466); }
+.node, .node.aiText, .node.aiImage, .node.onlineVideo {
+  background: linear-gradient(145deg, #15130f, #0e0d0b);
+  border-color: #494136;
+  box-shadow: 0 18px 38px #000b;
+}
+.node:hover { border-color: #7c6f5e; }
+.node.selected, .node.aiText.selected, .node.aiImage.selected, .node.onlineVideo.selected {
+  outline-color: #c5a77b;
+  border-color: #b2946c;
+  box-shadow: 0 18px 42px #000d;
+}
+.node-head { background: #1b1813; border-bottom-color: #342f28; }
+.node-head span { color: #d9c09d; }
+.port { background: var(--ui-accent); border-color: #0c0b09; box-shadow: 0 0 0 3px #14120f; }
+.ai-generation-node, .ai-generation-node-empty,
+.ai-generation-node.picture .ai-generation-node-empty,
+.ai-generation-node.video .ai-generation-node-empty { background: radial-gradient(circle at 50% 34%, #a77b4212, transparent 43%), #0f0e0c; }
+.ai-generation-node-empty > span,
+.ai-generation-node.picture .ai-generation-node-empty > span,
+.ai-generation-node.video .ai-generation-node-empty > span {
+  border-color: #6f604b; background: #201b14; color: #eed3ac;
+}
+.ai-generation-node-empty b, .ai-composer-title b { color: #f0dfc7; }
+.ai-generation-node-empty small { color: #9d8f7c; }
+.ai-composer, .ai-composer.ai-console, .online-video-composer.online-video-unified-console,
+.online-provider-dialog, .workflow-library, .canvas-shortcuts-dialog {
+  background: #14120f; border-color: #4c4338; box-shadow: 0 28px 65px #000e;
+}
+.ai-console-close, .online-video-console-close { background: #1b1813; border-color: #51473c; color: #c8bba8; }
+.ai-consolebar, .online-video-unified-console .online-video-consolebar { border-top-color: #373129; }
+.ai-console-parameters, .online-video-popover, .ai-recognition-panel, .ai-mention-menu, .ai-text-canvas-picker { background: #181510; border-color: #50463a; }
+.ai-console-parameters input, .ai-console-parameters select,
+.ai-composer input, .ai-composer select, .ai-composer textarea,
+.online-provider-dialog input, .online-provider-dialog select,
+.workflow-library-toolbar input, .workflow-library-toolbar select,
+.workflow-library-body > main textarea, .workflow-library-body > main label > input {
+  background: #0d0c0a; border-color: #4a4136; color: #ede0cb;
+}
+.ai-console-prompt, .ai-consolebar select, .online-video-consolebar select { color: #eadcc8; }
+.ai-console-prompt::placeholder { color: #7d7163; }
+.ai-console-add { border-color: #756b79; background: #1c1a1b; color: #d9c8ef; }
+.ai-console-add.mint { border-color: #557b72; background: #12241f; color: #9bdace; }
+.ai-prompt-library-button, .ai-at-image-button, .ai-prompt-expand { background: #1a1713; border-color: #564b3e; color: #dbccb8; }
+.ai-prompt-library-button:hover, .ai-at-image-button:hover, .ai-prompt-expand:hover { border-color: #b89a6d; color: #f1d8af; }
+
+/* Prompt library: one persistent, searchable collection shared by text, image and video composers. */
+.prompt-library-overlay { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: 28px; background: #0000009c; backdrop-filter: blur(7px); }
+.prompt-library-dialog { width: min(760px, calc(100vw - 36px)); max-height: min(760px, calc(100vh - 44px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid #6d5940; border-radius: 13px; background: #15120f; box-shadow: 0 30px 90px #000; color: #e9dfd1; }
+.prompt-library-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 22px 24px 16px; border-bottom: 1px solid #403528; }
+.prompt-library-dialog header span { display: block; color: #caa772; font-size: 11px; letter-spacing: .12em; }
+.prompt-library-dialog header b { display: block; margin-top: 5px; font-size: 21px; }
+.prompt-library-dialog header small { display: block; margin-top: 5px; color: #938779; }
+.prompt-library-dialog header > button { width: 34px; height: 34px; border: 1px solid #5e4f3b; border-radius: 50%; background: transparent; color: #e2d4be; cursor: pointer; font-size: 24px; line-height: 1; }
+.prompt-library-compose { padding: 16px 24px 10px; border-bottom: 1px solid #342c22; }
+.prompt-library-compose textarea { width: 100%; min-height: 88px; resize: vertical; box-sizing: border-box; border: 1px solid #594a37; border-radius: 8px; padding: 11px; background: #0d0c0a; color: #eee4d5; font: 14px "Microsoft YaHei UI", sans-serif; outline: none; }
+.prompt-library-compose textarea:focus,.prompt-library-compose input:focus,.prompt-library-toolbar > input:focus,.prompt-library-rename input:focus { border-color: #c3a06b; }
+.prompt-library-compose > div { display: flex; gap: 9px; margin-top: 9px; }
+.prompt-library-compose input,.prompt-library-toolbar > input,.prompt-library-rename input { min-width: 0; flex: 1; box-sizing: border-box; border: 1px solid #4f4333; border-radius: 7px; padding: 9px 10px; background: #0e0c0a; color: #ede1ce; outline: none; }
+.prompt-library-dialog button { font: 12px "Microsoft YaHei UI", sans-serif; }
+.prompt-library-dialog .primary { border: 1px solid #c39b63; border-radius: 7px; padding: 0 14px; background: #3a2d1d; color: #f4dfbd; cursor: pointer; }
+.prompt-library-dialog .primary:disabled { opacity: .45; cursor: default; }
+.prompt-library-toolbar { display: flex; gap: 12px; align-items: center; padding: 12px 24px; border-bottom: 1px solid #342c22; }
+.prompt-library-toolbar > input { max-width: 230px; }
+.prompt-library-toolbar > div { display: flex; flex: 1; gap: 6px; overflow: auto; padding-bottom: 1px; }
+.prompt-library-toolbar button,.prompt-library-rename button { flex: 0 0 auto; border: 1px solid #584a37; border-radius: 6px; padding: 7px 10px; background: #1d1813; color: #cfc1ad; cursor: pointer; white-space: nowrap; }
+.prompt-library-toolbar button.active { border-color: #c39b63; background: #382a1a; color: #f3dbb4; }
+.prompt-library-rename { display: flex; align-items: center; gap: 9px; padding: 10px 24px; background: #1b1712; color: #c5b59f; font-size: 12px; }
+.prompt-library-list { min-height: 120px; overflow: auto; padding: 10px 24px 20px; }
+.prompt-library-list article { display: flex; margin: 7px 0; overflow: hidden; border: 1px solid #453a2d; border-radius: 8px; background: #110f0c; }
+.prompt-library-insert { display: grid; flex: 1; gap: 4px; border: 0; padding: 10px 12px; background: transparent; color: #e8dfd2; text-align: left; cursor: pointer; }
+.prompt-library-insert:hover { background: #292015; }
+.prompt-library-insert b { color: #c6a36d; font-size: 11px; font-weight: 500; }.prompt-library-insert span { line-height: 1.5; }
+.prompt-library-list .danger { width: 38px; border: 0; border-left: 1px solid #453a2d; background: transparent; color: #bd8279; cursor: pointer; font-size: 18px; }.prompt-library-list .danger:hover { background: #3a201d; color: #ffd3cd; }.prompt-library-list p { color: #8f8376; text-align: center; padding: 22px 0; }
+@media (max-width: 640px) { .prompt-library-overlay { padding: 10px; }.prompt-library-toolbar { align-items: stretch; flex-direction: column; }.prompt-library-toolbar > input { max-width: none; }.prompt-library-rename { flex-wrap: wrap; }.prompt-library-rename input { min-width: 160px; }.prompt-library-dialog > header,.prompt-library-compose,.prompt-library-toolbar,.prompt-library-rename,.prompt-library-list { padding-right: 16px; padding-left: 16px; } }
+.ai-generate-button {
+  border-color: #f0dfc8; background: #f0dfc8; color: #2a2017; font-weight: 700; box-shadow: 0 4px 14px #d6aa7422;
+}
+.ai-generate-button:hover:not(:disabled) { background: #fff0dc; }
+.online-provider-dialog footer button.primary, .workflow-library button.primary { background: #2a2118; border-color: #917957; color: #edd8b8; }
+.provider-test-result.success { background: #11211c; border-color: #48766b; color: #c0e1d6; }
+.provider-test-result.error { background: #281815; border-color: #764842; color: #f1c0b7; }
+.points-balance-card { border-color: #514535; background: linear-gradient(145deg, #1b1610, #100f0c); }
+.points-balance-card > button, .points-package-grid button, .points-simulator button { background: #efe0c9; border-color: #efe0c9; color: #302317; }
+.points-balance-card .points-value, .points-cost, .credit-cost, .credit-amount { color: #dfb978; }
+.media-lib-overlay, .director-overlay { background: #090807 !important; }
+.media-lib-panel, .director-shell { background: #0f0e0c !important; border-color: #474036 !important; }
+.media-lib-panel header, .director-shell .director-topbar { background: #181510 !important; border-color: #393229 !important; }
+.media-lib-card, .director-shell .director-asset-card { background: #15130f !important; border-color: #494035 !important; }
+.media-lib-card:hover, .director-shell .director-asset-card:hover { border-color: #b49a70 !important; }
+.director-shell .director-stage, .director-shell .director-preview-wrap, .director-shell .director-timeline { background: #090807 !important; }
+::selection { background: #c39b663d; color: #fff1dc; }
+::-webkit-scrollbar-thumb { background-color: #766b5f99; }
+::-webkit-scrollbar-thumb:hover { background-color: #a99b87; }
+
+/* Remove the remaining legacy teal controls.  Every surface participates in
+   the same warm-black system; mint is reserved for a tiny status signal. */
+.app button,
+.app .button,
+.app .studio-toggle,
+.app .side-action,
+.app .points-sidebar nav button,
+.app .workflow-library-actions button,
+.app .storyboard-import button,
+.app .add-storyboard-row,
+.app .comfy-node-parameter-panel > footer button,
+.app .ai-recognition-panel > footer button {
+  border-color: #51473b !important;
+  background: #1a1712 !important;
+  color: #ddcfbc !important;
+  box-shadow: none !important;
+}
+.app button:hover:not(:disabled),
+.app .button:hover,
+.app .side-action:hover,
+.app .points-sidebar nav button:hover,
+.app .workflow-library-actions button:hover,
+.app .add-storyboard-row:hover {
+  border-color: #ae936b !important;
+  background: #282117 !important;
+  color: #fff0d8 !important;
+}
+.app button.primary,
+.app .button.primary,
+.app .ai-generate-button,
+.app .top-actions button:nth-last-child(2),
+.app .points-balance-card > button,
+.app .points-package-grid button,
+.app .points-simulator button,
+.app .comfy-node-parameter-panel > footer button.primary,
+.app .ai-recognition-panel > footer button.primary {
+  border-color: #f0dfc8 !important;
+  background: #f0dfc8 !important;
+  color: #2a2017 !important;
+}
+.app .ai-console-add.mint,
+.app .studio-toggle.open,
+.app .points-sidebar nav button.active {
+  border-color: #55786e !important;
+  background: #14241f !important;
+  color: #cce3d8 !important;
+}
+.app .studio-credit,
+.app .sidebar-minimap,
+.app .recent,
+.app .recent-body,
+.app .api-config-panel,
+.app .comfy-node-parameter-panel,
+.app .storyboard-composer,
+.app .storyboard-table-wrap,
+.app .storyboard-import,
+.app .log-panel {
+  border-color: #443c32 !important;
+  background: #12100d !important;
+  color: #e5d7c4 !important;
+}
+.app .studio-credit,
+.app .points-balance-card,
+.app .recent-tab,
+.app .storyboard-table th {
+  background: #1d1812 !important;
+  border-color: #4b4033 !important;
+}
+.app .storyboard-table td { border-color: #393127 !important; }
+.app .storyboard-table input,
+.app .storyboard-table textarea,
+.app .storyboard-table select,
+.app .api-config-panel input,
+.app .api-config-panel select,
+.app .comfy-node-parameter-panel input,
+.app .comfy-node-parameter-panel select,
+.app .comfy-node-parameter-panel textarea {
+  border-color: #4a4035 !important;
+  background: #0d0c0a !important;
+  color: #eadbc6 !important;
+}
+.app .storyboard-table th,
+.app .storyboard-trigger th,
+.app .studio-credit small,
+.app .sidebar-title small,
+.app .recent-body p { color: #b6a58f !important; }
+.app .side-action b { background: #251f17 !important; border-color: #5a4c3c !important; color: #e6c68f !important; }
+.app .side-action.image b, .app .side-action.ai-image b { color: #b7d2e8 !important; }
+.app .side-action.video b { color: #e4bcce !important; }
+.app .side-action.audio b { color: #e5b777 !important; }
+.app .side-action.workflow b { color: var(--cc-gold) !important; }
+.app .side-action.ai-text b { color: #d7c0e5 !important; }
+.app .side-action.online-video b { color: #e4c77d !important; }
+.app input[type="checkbox"], .app input[type="range"] { accent-color: #c8a675; }
+
+/* Final warm-material pass.  Older component groups use the shared accent
+   token for controls, so make it brass rather than reserve a second teal UI
+   system.  Green remains only for small connection and successful-test cues. */
+.app.theme-obsidian,
+.app.theme-graphite,
+.app.theme-midnight {
+  --ui-accent: var(--cc-gold);
+  --ui-accent-soft: var(--cc-gold-soft);
+}
+.connection-dot.connected {
+  color: var(--cc-status-good);
+  background: var(--cc-status-good);
+}
+.app .ai-console-add.mint,
+.app .studio-toggle.open,
+.app .points-sidebar nav button.active,
+.app .theme-options button.active,
+.app .workflow-library-body > aside > button.active,
+.app .workflow-library-body > aside > button.active:hover,
+.app .online-provider-tabs button.active {
+  border-color: #8b7351 !important;
+  background: #2a2118 !important;
+  color: #ead6b7 !important;
+  box-shadow: inset 3px 0 #b89a6d !important;
+}
+.app .provider-test-button,
+.app .provider-select-row button,
+.app .custom-provider-add button,
+.app .provider-model-discovery button,
+.app .online-provider-dialog footer button.primary,
+.app .workflow-library button.primary {
+  border-color: #8b7351 !important;
+  background: #2a2118 !important;
+  color: #ead6b7 !important;
+}
+.app .provider-test-button:hover:not(:disabled),
+.app .provider-select-row button:hover:not(:disabled),
+.app .custom-provider-add button:hover:not(:disabled),
+.app .provider-model-discovery button:hover:not(:disabled),
+.app .online-provider-dialog footer button.primary:hover:not(:disabled),
+.app .workflow-library button.primary:hover:not(:disabled) {
+  border-color: #c6a675 !important;
+  background: #382b1e !important;
+  color: #fff0d8 !important;
+}
+.app .cloud-config-status.configured,
+.app .detected-model-summary span,
+.app .points-notice span,
+.app .points-price-card > span,
+.app .points-package-grid article.recommended {
+  border-color: #6d5a40 !important;
+  background: #211a13 !important;
+  color: #d9bd8d !important;
+  box-shadow: none !important;
+}
+.app .points-package-grid em {
+  background: #b89a6d !important;
+  color: #20170f !important;
+}
+
+/* Cinematic storyboard canvas ------------------------------------------------
+   The canvas remains an editable spatial workspace.  This layer changes only
+   its presentation into the quiet editorial composition used by the director
+   reference: a black stage, deliberate empty space and framed shot cards. */
+.app {
+  background: #090806;
+}
+.topbar {
+  height: 58px;
+  padding: 0 38px;
+  border-bottom: 1px solid #302a23;
+  background: linear-gradient(180deg, #0b0a08 0%, #090806 100%);
+}
+.brand { gap: 10px; }
+.brand b {
+  color: #f0ddbd;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: .1em;
+}
+.brand span {
+  position: absolute;
+  left: 50%;
+  max-width: 320px;
+  transform: translateX(-50%);
+  color: #a99b88;
+  font-size: 12px;
+  letter-spacing: .12em;
+  text-align: center;
+}
+.brand span::before {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 10px 1px 0;
+  border-radius: 50%;
+  background: #7fa99d;
+  content: "";
+}
+.topbar .brand .connection-dot {
+  display: block;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  margin: 0;
+  border-radius: 50%;
+  box-shadow: 0 0 10px currentColor;
+}
+.topbar .brand .connection-dot.connected { color: #79ab9a; background: #79ab9a !important; }
+.topbar .brand .connection-dot.disconnected { color: #ca7167; background: #ca7167 !important; }
+.top-actions { gap: 13px; }
+.top-actions button,
+.top-actions .button {
+  min-width: 52px;
+  border: 0 !important;
+  background: transparent !important;
+  color: #d7c7b1 !important;
+  font-size: 13px;
+  letter-spacing: .08em;
+}
+.top-actions button:hover,
+.top-actions .button:hover {
+  background: #1d1812 !important;
+  color: #fff0d8 !important;
+}
+.top-actions button:nth-last-child(2) {
+  border: 1px solid #ecdbc5 !important;
+  border-radius: 10px !important;
+  background: #f0dfc8 !important;
+  color: #2b2118 !important;
+  box-shadow: 0 5px 16px #0006 !important;
+}
+.top-menu { border-color: #504537; background: #15120f; }
+
+.canvas {
+  background-color: #090806 !important;
+  background-image: radial-gradient(ellipse at 50% 46%, #20180f24 0%, transparent 48%) !important;
+  background-size: cover !important;
+}
+.wires path { stroke: #5d5143; stroke-width: 1px; opacity: .42; }
+.wires path.active { stroke: #b79a6c; filter: drop-shadow(0 0 2px #b79a6c66); }
+.wires path.draft { stroke: #d9bf90; }
+
+.studio-toggle {
+  top: auto;
+  bottom: 25px;
+  left: 26px;
+  border: 1px solid #4c4033 !important;
+  border-radius: 6px !important;
+  background: #15120ee8 !important;
+  color: #cdbb9f !important;
+  box-shadow: none !important;
+}
+.studio-toggle.open { left: 262px; }
+.studio-sidebar {
+  padding-top: 92px;
+  background: #100e0b;
+  border-right-color: #40372d;
+  box-shadow: 18px 0 45px #000b;
+}
+
+.node,
+.node.aiText, .node.aiImage, .node.onlineVideo,
+.node.image, .node.video, .node.text, .node.storyboard {
+  border: 1px solid #51463a;
+  border-radius: 7px;
+  background: linear-gradient(145deg, #17130e, #100f0c);
+  box-shadow: 0 18px 42px #000b;
+}
+.node:hover { border-color: #927955; }
+.node.selected,
+.node.aiText.selected, .node.aiImage.selected, .node.onlineVideo.selected {
+  outline: 1px solid #c6a675;
+  outline-offset: 3px;
+  border-color: #a98b60;
+  box-shadow: 0 20px 48px #000d;
+}
+.node-head {
+  height: 34px;
+  padding: 0 14px;
+  border-bottom: 1px solid #352d24;
+  border-radius: 6px 6px 0 0;
+  background: #1b1712;
+}
+.node-head span { color: #bda47b; font-size: 10px; letter-spacing: .08em; }
+.node-head em { color: #e7d7c0; font-family: "Noto Serif SC", "Songti SC", serif; font-size: 13px; font-style: normal; }
+.node.image img, .node.image video, .node.video img, .node.video video,
+.ai-generation-node > img, .ai-generation-node.video .online-video-node-result {
+  filter: saturate(.76) contrast(1.04) brightness(.87);
+}
+.node.image .node-head, .node.video .node-head { background: #1b1712; }
+.node.text { color: #e3d4bd; }
+.node.text textarea, .node.text input { color: #e8dac5; }
+.port { background: #b89a6d; border-color: #110f0c; box-shadow: 0 0 0 3px #15120e; }
+
+.ai-generation-node,
+.ai-generation-node-empty,
+.ai-generation-node.picture .ai-generation-node-empty,
+.ai-generation-node.video .ai-generation-node-empty {
+  background: radial-gradient(circle at 50% 35%, #af875414, transparent 46%), #100f0c;
+}
+.ai-generation-node-empty > span,
+.ai-generation-node.picture .ai-generation-node-empty > span,
+.ai-generation-node.video .ai-generation-node-empty > span {
+  border-color: #806947;
+  background: #251d14;
+  color: #e5c897;
+}
+
+@media (max-width: 760px) {
+  .topbar { height: 62px; padding: 0 16px; }
+  .brand b { font-size: 15px; }
+  .brand span { display: none; }
+  .top-actions { gap: 3px; }
+  .top-actions button, .top-actions .button { min-width: 38px; padding: 7px; font-size: 11px; }
+  .studio-toggle { left: 12px; bottom: 14px; }
+}
+
+/* Default opening scene ---------------------------------------------------- */
+.cinematic-landing {
+  position: absolute;
+  z-index: 1000;
+  inset: 0;
+  overflow: auto;
+  background: radial-gradient(900px 580px at 50% 48%, #17110b 0%, #0b0907 48%, #080706 100%);
+  color: #e8d9c2;
+  font-family: "Noto Serif SC", "Songti SC", "STSong", "SimSun", serif;
+}
+.cinematic-landing-header {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 76px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  padding: 0 45px;
+  border-bottom: 1px solid #302a23;
+  background: #0a0907e8;
+}
+.cinematic-brand {
+  justify-self: start;
+  color: #f0ddbd;
+  font: 600 20px/1 "Noto Serif SC", "Songti SC", serif;
+  letter-spacing: .1em;
+}
+.cinematic-landing-header p {
+  margin: 0;
+  color: #b9aa95;
+  font-size: 13px;
+  letter-spacing: .09em;
+}
+.cinematic-landing-header p i,
+.cinematic-outputs footer i {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin: 0 10px 1px 0;
+  border-radius: 50%;
+  background: #82b7aa;
+}
+.cinematic-landing-header nav {
+  display: flex;
+  justify-self: end;
+  align-items: center;
+  gap: 18px;
+}
+.cinematic-landing-header nav button {
+  min-width: 52px;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #e1d1b9;
+  font: 600 14px "Noto Serif SC", "Songti SC", serif;
+  letter-spacing: .08em;
+}
+.cinematic-landing-header nav button:hover { background: #1c1711; color: #fff0d8; }
+.cinematic-landing-header nav .cinematic-generate-nav {
+  min-width: 82px;
+  border-color: #e8d7c0;
+  background: #f0dfc8;
+  color: #2a2017;
+}
+.cinematic-stage {
+  position: absolute;
+  top: 76px;
+  right: 0;
+  bottom: 112px;
+  left: 0;
+  display: grid;
+  grid-template-columns: minmax(390px, 564px) 260px;
+  justify-content: center;
+  align-content: center;
+  gap: clamp(50px, 6vw, 108px);
+  padding: 40px 190px 24px;
+}
+.cinematic-main-card,
+.cinematic-outputs article {
+  overflow: hidden;
+  border: 1px solid #494035;
+  border-radius: 7px;
+  background: linear-gradient(145deg, #15120e, #100e0b);
+  box-shadow: 0 18px 46px #0009;
+}
+.cinematic-main-card {
+  align-self: center;
+  margin-top: -16px;
+}
+.cinematic-main-card img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  filter: saturate(.77) contrast(1.04) brightness(.84);
+}
+.cinematic-main-copy {
+  padding: 23px 24px 22px;
+  border-top: 1px solid #28221b;
+}
+.cinematic-main-copy small {
+  color: #c4af8c;
+  font-size: 12px;
+  letter-spacing: .08em;
+}
+.cinematic-main-copy h1 {
+  margin: 11px 0 14px;
+  color: #f2dfc2;
+  font-size: clamp(28px, 2.4vw, 39px);
+  font-weight: 500;
+  letter-spacing: .08em;
+}
+.cinematic-main-copy p {
+  margin: 0;
+  color: #bcae9a;
+  font-size: 14px;
+  line-height: 1.9;
+  letter-spacing: .035em;
+}
+.cinematic-outputs {
+  display: grid;
+  align-content: center;
+  gap: clamp(48px, 6vh, 94px);
+}
+.cinematic-outputs article { padding: 11px; }
+.cinematic-outputs img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  filter: saturate(.55) contrast(1.08) brightness(.76);
+}
+.cinematic-outputs footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 4px 6px;
+  color: #d1c0a8;
+  font-size: 14px;
+  letter-spacing: .08em;
+}
+.cinematic-outputs footer i { width: 8px; height: 8px; margin: 0; }
+.cinematic-note-toggle {
+  position: absolute;
+  z-index: 3;
+  right: 30px;
+  bottom: 28px;
+  padding: 6px 9px;
+  border: 1px solid #443a2e;
+  border-radius: 5px;
+  background: #100e0b;
+  color: #9d8d76;
+  font-size: 11px;
+}
+.cinematic-note-toggle:hover { border-color: #8c7552; color: #ead5b4; }
+.cinematic-note {
+  position: absolute;
+  z-index: 1;
+  display: grid;
+  gap: 6px;
+  color: #958c82;
+  font: 18px/1.65 "KaiTi", "STKaiti", "FangSong", serif;
+  letter-spacing: .08em;
+  text-align: left;
+  opacity: .8;
+  transform: rotate(-8deg);
+}
+.cinematic-note span { text-shadow: 0 2px 8px #000; }
+.cinematic-note i {
+  display: block;
+  width: 70px;
+  height: 34px;
+  justify-self: end;
+  border-right: 1px solid #9b9185;
+  border-bottom: 1px solid #9b9185;
+  border-radius: 0 0 28px 0;
+  transform: rotate(12deg);
+}
+.cinematic-note i::after {
+  display: block;
+  width: 7px;
+  height: 7px;
+  margin: 27px 0 0 65px;
+  border-top: 1px solid #9b9185;
+  border-right: 1px solid #9b9185;
+  content: "";
+  transform: rotate(45deg);
+}
+.cinematic-note.left { top: 42%; right: calc(50% + 390px); }
+.cinematic-note.right { top: 57%; left: calc(50% + 460px); transform: rotate(7deg); }
+.cinematic-note.right i { justify-self: start; transform: scaleX(-1) rotate(12deg); }
+.cinematic-prompt {
+  position: absolute;
+  z-index: 2;
+  right: 50%;
+  bottom: 46px;
+  width: min(744px, calc(100vw - 44px));
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-sizing: border-box;
+  padding: 10px 12px 10px 20px;
+  border: 1px solid #514639;
+  border-radius: 16px;
+  background: #11100de8;
+  box-shadow: 0 16px 48px #0008;
+  transform: translateX(50%);
+}
+.cinematic-prompt input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #eadbc5;
+  font: 14px "Noto Serif SC", "Songti SC", serif;
+}
+.cinematic-prompt input::placeholder { color: #766b5d; }
+.cinematic-prompt button {
+  min-width: 86px;
+  padding: 11px 17px;
+  border: 1px solid #ecdbc4;
+  border-radius: 10px;
+  background: #f0dfc8;
+  color: #2a2017;
+  font: 600 14px "Noto Serif SC", "Songti SC", serif;
+}
+.cinematic-prompt button:hover,
+.cinematic-generate-nav:hover { filter: brightness(1.06); }
+@media (max-width: 1040px) {
+  .cinematic-stage { grid-template-columns: minmax(340px, 520px) 220px; gap: 34px; padding-right: 58px; padding-left: 58px; }
+  .cinematic-note { display: none; }
+}
+@media (max-width: 700px) {
+  .cinematic-landing-header { height: 62px; grid-template-columns: 1fr auto; padding: 0 16px; }
+  .cinematic-landing-header p { display: none; }
+  .cinematic-brand { font-size: 16px; }
+  .cinematic-landing-header nav { gap: 2px; }
+  .cinematic-landing-header nav button { min-width: 42px; padding: 7px 6px; font-size: 12px; }
+  .cinematic-landing-header nav .cinematic-generate-nav { min-width: 58px; }
+  .cinematic-stage { top: 62px; bottom: 88px; grid-template-columns: 1fr; align-content: start; padding: 28px 22px; overflow: auto; }
+  .cinematic-main-card { margin-top: 0; }
+  .cinematic-main-copy { padding: 16px; }
+  .cinematic-main-copy h1 { margin: 8px 0; font-size: 28px; }
+  .cinematic-main-copy p { font-size: 12px; }
+  .cinematic-main-copy br { display: none; }
+  .cinematic-outputs { grid-template-columns: 1fr 1fr; gap: 12px; }
+  .cinematic-outputs article { padding: 7px; }
+  .cinematic-outputs footer { padding: 9px 2px 2px; font-size: 11px; }
+  .cinematic-prompt { bottom: 16px; padding: 7px 8px 7px 13px; border-radius: 11px; }
+  .cinematic-prompt button { min-width: 64px; padding: 9px; }
+  .cinematic-note-toggle { right: 18px; bottom: 84px; }
+}
+
+/* In-frame creation actions ------------------------------------------------ */
+.node-inline-actions {
+  display: grid !important;
+  place-content: center;
+  gap: 9px;
+}
+.node-inline-actions .node-add-primary,
+.node-inline-actions .node-add-ai,
+.text-add-ai {
+  border: 1px solid #5a4b39 !important;
+  border-radius: 5px !important;
+  background: #17130e !important;
+  color: #ddbd80 !important;
+  font: 12px "Noto Serif SC", "Songti SC", serif !important;
+  letter-spacing: .04em;
+}
+.node-inline-actions .node-add-primary { padding: 9px 15px !important; }
+.node-inline-actions .node-add-ai { padding: 7px 12px !important; color: #baa687 !important; }
+.node-inline-actions .node-add-primary:hover,
+.node-inline-actions .node-add-ai:hover,
+.text-add-ai:hover { border-color: #b99a68 !important; background: #271e14 !important; color: #fff0d7 !important; }
+.node.text .text-add-ai {
+  padding: 6px 10px;
+}
+.node.text .text-ai-actions {
+  position: absolute;
+  z-index: 5;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: calc(100% - 24px);
+}
+.node.text .text-ai-actions .text-add-ai { position: static; }
+.node.text .text-ai-actions .text-add-ai.storyboard { color: #c9b899 !important; }
+
+/* Semi-transparent, frame-free director annotation.  The small bent pointer
+   is drawn in CSS so it stays sharp at every zoom instead of using an emoji. */
+.node.annotation {
+  min-width: 140px;
+  min-height: 70px;
+  overflow: visible;
+  border-color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+.node.annotation:hover,
+.node.annotation.selected {
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+.node.annotation.selected { outline: 1px dashed #a98d62 !important; outline-offset: 5px; }
+.annotation-node {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  opacity: .5;
+}
+.annotation-pointer {
+  position: absolute;
+  right: 2px;
+  bottom: -46px;
+  width: 54px;
+  height: 58px;
+  overflow: visible;
+  pointer-events: none;
+}
+.annotation-pointer path {
+  fill: none;
+  stroke: #d5c39e;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.node.annotation.mirrored .annotation-pointer { right: auto; left: 2px; }
+.annotation-node textarea,
+.annotation-text {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  resize: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #d9d2c8;
+  font: 19px/1.55 "KaiTi", "STKaiti", "FangSong", serif;
+  letter-spacing: .07em;
+  text-shadow: 0 2px 8px #000;
+  padding: 7px 10px;
+}
+.annotation-text {
+  white-space: pre-wrap;
+  cursor: grab;
+}
+.node.annotation:active .annotation-text { cursor: grabbing; }
+.annotation-tools {
+  position: absolute;
+  top: -27px;
+  right: 0;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity .16s ease, visibility 0s linear 1.2s;
+}
+.node.annotation:hover .annotation-tools,
+.node.annotation.selected .annotation-tools {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+.annotation-tools button {
+  display: grid;
+  min-width: 32px;
+  height: 23px;
+  padding: 0 6px;
+  place-items: center;
+  border: 1px solid #766144;
+  border-radius: 4px;
+  background: #17120dde;
+  color: #e0c38f;
+  font: 10px/1 "Noto Serif SC", "Songti SC", serif;
+  white-space: nowrap;
+}
+.annotation-tools button:hover,
+.annotation-tools button.active { border-color: #d0aa6d; background: #332516; color: #fff0d4; }
+.node.annotation .resize {
+  z-index: 8;
+  right: -8px;
+  bottom: -8px;
+  width: 13px;
+  height: 13px;
+  border: 0;
+  background: linear-gradient(135deg, transparent 0 38%, #c5a36e 39% 49%, transparent 50% 58%, #c5a36e 59% 69%, transparent 70%);
+}
+.node.annotation .rotate {
+  position: absolute;
+  z-index: 9;
+  right: -37px;
+  bottom: -8px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid #806943;
+  border-radius: 50%;
+  background: #17120dde;
+  color: #e0c38f;
+  cursor: grab;
+  font: 10px/1 "Noto Serif SC", "Songti SC", serif;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity .16s ease, visibility 0s linear 1.2s, border-color .16s ease;
+}
+.node.annotation:hover .rotate,
+.node.annotation.selected .rotate { opacity: 1; visibility: visible; transition-delay: 0s; }
+.node.annotation .rotate:hover { border-color: #d0aa6d; color: #fff0d4; }
+.node.annotation .rotate:active { cursor: grabbing; }
+.node.annotation.locked { cursor: default; }
+.node.annotation.locked .annotation-node textarea { cursor: text; }
+.node.annotationPointer {
+  min-width: 34px;
+  min-height: 34px;
+  overflow: visible;
+  border-color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+.node.annotationPointer:hover,
+.node.annotationPointer.selected { border-color: transparent !important; box-shadow: none !important; }
+.node.annotationPointer.selected { outline: 1px dashed #a98d62 !important; outline-offset: 5px; }
+.annotation-pointer-node { position: relative; width: 100%; height: 100%; opacity: .62; }
+.annotation-pointer-node > svg { width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.annotation-pointer-node path { fill: none; stroke: #d5c39e; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.node.annotationPointer:hover .annotation-tools,
+.node.annotationPointer.selected .annotation-tools { opacity: 1; visibility: visible; transition-delay: 0s; }
+.node.annotationPointer .resize {
+  z-index: 8;
+  right: -8px;
+  bottom: -8px;
+  width: 13px;
+  height: 13px;
+  border: 0;
+  background: linear-gradient(135deg, transparent 0 38%, #c5a36e 39% 49%, transparent 50% 58%, #c5a36e 59% 69%, transparent 70%);
+}
+.node.annotationPointer .rotate {
+  position: absolute;
+  z-index: 9;
+  right: -37px;
+  bottom: -8px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid #806943;
+  border-radius: 50%;
+  background: #17120dde;
+  color: #e0c38f;
+  cursor: grab;
+  font: 10px/1 "Noto Serif SC", "Songti SC", serif;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity .16s ease, visibility 0s linear 1.2s, border-color .16s ease;
+}
+.node.annotationPointer:hover .rotate,
+.node.annotationPointer.selected .rotate { opacity: 1; visibility: visible; transition-delay: 0s; }
+.node.annotationPointer .rotate:hover { border-color: #d0aa6d; color: #fff0d4; }
+.node.annotationPointer .rotate:active { cursor: grabbing; }
+
+/* Unified warm shell: canvas header, library and director workspace. */
+.canvas-project-name,
+.cinematic-project-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 180px;
+  color: #b9aa95;
+}
+.canvas-project-name {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.canvas-project-name input,
+.cinematic-project-name input {
+  width: min(340px, 30vw);
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #cdbb9f;
+  font: 16px "Noto Serif SC", "Songti SC", serif;
+  letter-spacing: .09em;
+  text-align: center;
+}
+.canvas-project-name input:focus,
+.cinematic-project-name input:focus { color: #fff0d7; }
+.canvas-project-name .connection-dot,
+.cinematic-project-name i {
+  display: block;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  margin: 0;
+  border-radius: 50%;
+  box-shadow: 0 0 10px currentColor;
+}
+.canvas-project-name .connection-dot.connected { color: #79ab9a; background: #79ab9a !important; }
+.canvas-project-name .connection-dot.disconnected { color: #ca7167; background: #ca7167 !important; }
+.cinematic-project-name i { background: #79ab9a; }
+.topbar { padding-right: 140px; }
+.topbar .brand span { display: none; }
+.topbar-drag-region {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+.topbar > .brand,
+.topbar > .canvas-project-name,
+.topbar > .top-actions,
+.topbar > .window-controls { z-index: 1; }
+.window-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+}
+.window-controls button {
+  width: 42px;
+  min-width: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  color: #bfb09a !important;
+  font: 18px/1 "Segoe UI Symbol", sans-serif !important;
+}
+.window-controls button:hover { background: #241d15 !important; color: #fff0d8 !important; }
+.window-controls .window-close:hover { background: #6a332d !important; color: #fff !important; }
+
+.app .canvas-status,
+.app .canvas-status button,
+.app .studio-credit,
+.app .canvas-navigator,
+.app .minimap,
+.app .canvas-media-picker {
+  border-color: #4d4133 !important;
+  background: #15120e !important;
+  color: #cdbb9f !important;
+  box-shadow: 0 12px 30px #0009 !important;
+}
+.app .canvas-status { color: #ad9d86 !important; }
+.app .canvas-status button:hover { border-color: #a98b60 !important; background: #271e14 !important; color: #fff0d8 !important; }
+
+.app .media-lib-panel,
+.app .media-lib-sidebar,
+.app .media-lib-main,
+.app .media-lib-toolbar,
+.app .media-lib-preview-box,
+.app .media-lib-ctxmenu,
+.app .media-lib-confirm-box {
+  background: #100e0b !important;
+  border-color: #4c4134 !important;
+  color: #e5d5bd !important;
+}
+.app .media-lib-head,
+.app .media-lib-sbar-title,
+.app .media-lib-toolbar { border-color: #3c3329 !important; background: #17130f !important; }
+.app .media-lib-grp,
+.app .media-lib-tab,
+.app .media-lib-org-btn,
+.app .media-lib-add-grp,
+.app .media-lib-act,
+.app .media-lib-ctx-item,
+.app .media-lib-preview-close {
+  border-color: #5a4b3a !important;
+  background: #1a1510 !important;
+  color: #cfb58c !important;
+}
+.app .media-lib-grp.active,
+.app .media-lib-tab.active { background: #2b2118 !important; border-color: #967a53 !important; color: #f0d4a4 !important; }
+.app .media-lib-grp:hover,
+.app .media-lib-tab:hover,
+.app .media-lib-org-btn:hover,
+.app .media-lib-act:hover,
+.app .media-lib-ctx-item:hover { background: #2a2117 !important; border-color: #b59667 !important; color: #fff0d7 !important; }
+.app .media-lib-card,
+.app .media-lib-type-heading,
+.app .media-lib-srch input,
+.app .media-lib-rename-inp { border-color: #4b4033 !important; background: #15110d !important; color: #ddcfbb !important; }
+
+.app .director-shell,
+.app .director-head,
+.app .director-script,
+.app .director-stage,
+.app .director-assets,
+.app .editor-timeline,
+.app .timeline-toolbar,
+.app .timeline-scroll,
+.app .director-export-dialog,
+.app .director-text-dialog {
+  background: #100e0b !important;
+  border-color: #4b4033 !important;
+  color: #e6d7c2 !important;
+}
+.app .director-head,
+.app .timeline-toolbar,
+.app .director-assets-head { background: #18130e !important; border-color: #44392d !important; }
+.app .director-shell button,
+.app .director-shell .button,
+.app .director-shell select,
+.app .director-shell input,
+.app .director-shell textarea {
+  border-color: #5a4b3a !important;
+  background: #1a1510 !important;
+  color: #ddcfbb !important;
+}
+.app .director-shell button:hover,
+.app .director-shell .active,
+.app .director-shell .timeline-snap.active,
+.app .director-shell .director-asset-groups button.active { border-color: #b59667 !important; background: #2b2118 !important; color: #fff0d7 !important; }
+.app .director-shell .track,
+.app .director-shell .timeline-row,
+.app .director-shell .timeline-ruler { border-color: #40362b !important; background-color: #0d0c0a !important; }
+
+/* Keep the last workspace action readable; the old absolute credit line could
+   sit on top of this card when the sidebar was short. */
+.app .studio-credit { display: none !important; }
+.app .flow-library .side-action {
+  min-height: 58px;
+  align-items: center;
+}
+.app .flow-library .side-action > span {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  line-height: 1.25;
+}
+.app .flow-library .side-action > span small {
+  display: block;
+  overflow: hidden;
+  color: #a99882 !important;
+  font-size: 10px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Warm-material completion pass ------------------------------------------------
+   These full-screen tools were composed before the cinematic palette landed.
+   Keep their information hierarchy, but remove the unrelated cyan/blue fields. */
+.app .ai-composer,
+.app .ai-composer.ai-console,
+.app .ai-recognition-panel,
+.app .ai-console-parameters,
+.app .ai-text-canvas-picker,
+.app .ai-mention-menu,
+.app .workflow-library,
+.app .workflow-library-body > aside,
+.app .workflow-library-body > main,
+.app .workflow-parameter-editor {
+  border-color: #4c4134 !important;
+  background: #12100d !important;
+  color: #e7d8c2 !important;
+  scrollbar-color: #665641 transparent;
+}
+.app .ai-composer.script,
+.app .ai-composer.picture { border-color: #6b5941 !important; }
+.app .ai-composer-title > span,
+.app .ai-composer.picture .ai-composer-title > span,
+.app .workflow-library-body > aside > button > span,
+.app .workflow-detail-title > span {
+  border: 1px solid #705c42 !important;
+  background: #241d15 !important;
+  color: #dfbd85 !important;
+}
+.app .ai-composer-title small,
+.app .ai-composer label,
+.app .ai-writing-hints,
+.app .workflow-library > header small,
+.app .workflow-library-count,
+.app .workflow-library-body > aside small,
+.app .workflow-detail-title small,
+.app .workflow-library-body > main > label,
+.app .workflow-parameter-editor > header small,
+.app .workflow-parameter-list article > div small,
+.app .workflow-library-empty,
+.app .workflow-detail-empty { color: #a99a85 !important; }
+.app .workflow-library > header span,
+.app .workflow-json-summary b,
+.app .ai-range b,
+.app .ai-consolebar .ai-comfy-workflow-select { color: #d5b87f !important; }
+.app .ai-composer input,
+.app .ai-composer select,
+.app .ai-composer textarea,
+.app .workflow-library-toolbar input,
+.app .workflow-library-toolbar select,
+.app .workflow-library-body > main textarea,
+.app .workflow-library-body > main label > input,
+.app .workflow-parameter-list input,
+.app .workflow-parameter-list select,
+.app .ai-console-negative {
+  border-color: #4d4135 !important;
+  background: #0d0c0a !important;
+  color: #eadbc6 !important;
+}
+.app .ai-prompt-area textarea:focus { border-color: #b89a6d !important; box-shadow: 0 0 0 1px #b89a6d33 !important; }
+.app .ai-mode-row > button.active,
+.app .ai-prompt-expand-icon.active,
+.app .workflow-library-body > aside > button.active,
+.app .workflow-parameter-list article.enabled {
+  border-color: #967a53 !important;
+  background: #2a2118 !important;
+  color: #f0d7ae !important;
+}
+.app .workflow-json-summary,
+.app .workflow-parameter-editor,
+.app .workflow-parameter-list article {
+  border-color: #493f33 !important;
+  background: #17130f !important;
+}
+.app .workflow-parameter-list article.enabled { background: #211a13 !important; }
+.app .workflow-parameter-list article > input[type="checkbox"],
+.app .ai-range input,
+.app .ai-check input { accent-color: #c29d65 !important; }
+
+/* Editing sheets, workspace cards and the director stage use the same bronze
+   surfaces.  Mint is no longer used as a general selection or panel colour. */
+.app .studio-sidebar,
+.app .sidebar-title,
+.app .project-overview,
+.app .overview-counts i,
+.app .director-shell .director-settings,
+.app .director-shell .director-empty,
+.app .director-shell .director-guide,
+.app .director-shell .timeline-empty,
+.app .director-shell .timeline-track {
+  border-color: #4c4134 !important;
+  background: #15120e !important;
+  color: #e4d4bd !important;
+}
+.app .overview-counts i,
+.app .director-shell .director-empty,
+.app .director-shell .timeline-empty { background: #0e0d0b !important; }
+.app .sidebar-title b,
+.app .project-overview strong,
+.app .director-shell h1,
+.app .director-shell h2,
+.app .director-shell h3 { color: #f0dec2 !important; }
+.app .sidebar-title small,
+.app .project-overview span,
+.app .director-shell small,
+.app .director-shell .empty-hint,
+.app .director-shell .director-empty { color: #ab9a83 !important; }
+
+/* Actual director and workspace elements (kept explicit so these cannot fall
+   back to the former teal component styles). */
+.app .project-overview {
+  border-color: #4c4134 !important;
+  background: #17130f !important;
+}
+.app .overview-counts i { background: #0e0d0b !important; }
+.app .brand-mark { background: #2a2118 !important; color: #dfbd85 !important; }
+.app .director-text-settings,
+.app .director-empty-preview,
+.app .director-preview-wrap,
+.app .director-stage .director-preview {
+  border-color: #4c4134 !important;
+  background: #0d0c0a !important;
+  color: #b9a78c !important;
+}
+.app .director-text-settings b { color: #f0dec2 !important; }
+.app .director-text-settings small,
+.app .director-text-settings p,
+.app .director-empty-preview { color: #ab9a83 !important; }
+
+/* Canvas nodes and navigation: remove the final legacy teal islands. */
+.app .node.batch,
+.app .node.audio,
+.app .node.text,
+.app .node.batch .batch-collector,
+.app .node.batch .batch-collector-empty,
+.app .node.audio .empty,
+.app .node.audio .audio-wave,
+.app .node.text .text-trigger {
+  border-color: #51463a !important;
+  background: #15120e !important;
+  color: #dfcfb8 !important;
+}
+.app .node.batch .node-head,
+.app .node.audio .node-head,
+.app .node.text .node-head {
+  border-color: #443a2f !important;
+  background: linear-gradient(180deg, #211b14 0%, #17130e 70%, #15120e00 100%) !important;
+  color: #e8d6b9 !important;
+}
+.app .node.batch .batch-collector-summary { color: #d7b97f !important; }
+.app .node.batch .batch-collector-summary span,
+.app .node.batch .batch-collector-empty,
+.app .node.batch .batch-collector-empty small { color: #ab9a83 !important; }
+.app .node.batch .batch-collector-empty { border-color: #5b4b39 !important; }
+.app .node.batch .batch-collector-item { border-color: #51463a !important; background: #0d0c0a !important; }
+.app .node.audio .audio-wave:hover { background: #211a13 !important; }
+.app .node.audio .audio-bars i { background: #93784e !important; }
+.app .node.audio .audio-wave.playing .audio-bars i { background: #d0aa6b !important; }
+.app .node.audio .audio-time { color: #c8ae84 !important; }
+.app .node.text .text-trigger { color: #e4d4bd !important; }
+
+.app .hint {
+  border-color: #544838 !important;
+  background: #15120ee8 !important;
+  color: #ae9c81 !important;
+}
+.app .media-lib-srch input,
+.app .media-lib-srch input:focus,
+.app .media-lib-rename-inp {
+  border-color: #5a4b3a !important;
+  background: #100e0b !important;
+  color: #e1cfb4 !important;
+  box-shadow: none !important;
+}
+.app .media-lib-srch input:focus { border-color: #af9061 !important; }
+.app .minimap,
+.app .minimap-world,
+.app .sidebar-minimap {
+  border-color: #4d4133 !important;
+  background: #120f0c !important;
+}
+.app .minimap-world:after,
+.app .sidebar-minimap::after { border-color: #92764e66 !important; }
+.app .minimap i,
+.app .sidebar-minimap i,
+.app .minimap i.image,
+.app .minimap i.video,
+.app .minimap i.audio,
+.app .minimap i.text,
+.app .sidebar-minimap i.image,
+.app .sidebar-minimap i.video,
+.app .sidebar-minimap i.audio,
+.app .sidebar-minimap i.text { background: #b79767 !important; }
+
+/* Text composer and both context menus are part of the canvas chrome. */
+.app .script-composer {
+  border-color: #51463a !important;
+  background: #15120ef5 !important;
+  color: #e6d5bb !important;
+}
+.app .script-composer.drop-ready {
+  border-color: #b89a6d !important;
+  box-shadow: 0 0 0 3px #b89a6d25, 0 18px 46px #000b !important;
+}
+.app .composer-top span { color: #d2b178 !important; }
+.app .composer-top small,
+.app .composer-foot span,
+.app .composer-empty-reference { color: #a99a83 !important; }
+.app .composer-top button,
+.app .composer-add-reference > button,
+.app .composer-foot button {
+  border-color: #5c4c39 !important;
+  background: #201911 !important;
+  color: #e3c99f !important;
+}
+.app .composer-reference,
+.app .composer-empty-reference {
+  border-color: #4c4134 !important;
+  background: #100e0b !important;
+}
+.app .composer-reference small { color: #b7a58b !important; }
+.app .script-composer textarea,
+.app .script-composer textarea:focus {
+  border-color: #9e8055 !important;
+  background: #0d0c0a !important;
+  color: #eadbc4 !important;
+  box-shadow: none !important;
+}
+.app .menu,
+.app .menu-submenu-panel {
+  border-color: #5a4b3a !important;
+  background: #17130f !important;
+  color: #e2d1b7 !important;
+}
+.app .menu button,
+.app .menu-submenu-panel button { color: #dfcfb6 !important; }
+.app .menu button:hover,
+.app .menu-submenu-panel button:hover { background: #2a2118 !important; color: #fff0d7 !important; }
+.app .menu hr { border-top-color: #4a3e31 !important; }
+
+/* Storyboard preview card still had its own teal header gradient. */
+.app .node.storyboard {
+  border-color: #51463a !important;
+  background: #15120e !important;
+  color: #e2d1b7 !important;
+}
+.app .node.storyboard .node-head {
+  border-color: #443a2f !important;
+  background: linear-gradient(180deg, #211b14 0%, #18130f 78%, #15120e 100%) !important;
+  color: #e8d6b9 !important;
+}
+.app .node.storyboard .storyboard-trigger { background: #15120e !important; color: #d9c8ad !important; }
+.app .node.storyboard .storyboard-trigger th {
+  border-bottom-color: #4a3e31 !important;
+  color: #d2b178 !important;
+}
+.app .node.storyboard .storyboard-trigger td { border-bottom-color: #352d24 !important; }
+.app .node.storyboard .storyboard-trigger small { color: #c7a66f !important; }
+
+/* In-place AI rendering feedback for regular media and text nodes. */
+.node-generation-progress {
+  position: absolute;
+  z-index: 30;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  width: 66px;
+  height: 66px;
+  place-items: center;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: #15120e;
+  box-shadow: 0 0 0 1px #e0c18a55, 0 12px 28px #000b;
+  pointer-events: none;
+}
+.node-generation-progress::before {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 4px solid #33291e;
+  border-top-color: #d2ae72;
+  content: "";
+  animation: node-generation-ring 1.1s linear infinite;
+}
+.node-generation-progress i,
+.node-generation-progress span { position: relative; z-index: 1; font-style: normal; }
+.node-generation-progress i { color: #f0d9aa; font: 700 13px/1 "Microsoft YaHei UI", sans-serif; }
+.node-generation-progress span { margin-top: -13px; color: #ad9670; font-size: 9px; }
+@keyframes node-generation-ring { to { transform: rotate(360deg); } }
+/* A running task owns the card surface. Do not leave stale prompts, result
+   labels or action buttons visible behind the progress ring. Ports remain
+   visible only as a passive connection indicator. */
+.node.status-running > :not(.node-generation-progress):not(.port) { visibility: hidden; pointer-events: none; }
+.node.status-running > .port { opacity: 0; pointer-events: none; }
+
+.online-linked-input-note {
+  margin: -1px 0 8px;
+  color: #bca57c;
+  font: 11px/1.4 "Microsoft YaHei UI", sans-serif;
+}
+
+/* The API dialog is intentionally a short happy-path form. Advanced protocol
+   settings still exist below, but no longer dominate the first screen. */
+.online-provider-dialog .provider-capability-tabs { display: none; }
+.online-provider-dialog .provider-capability-picker,
+.online-provider-dialog .manual-model-row { margin-top: 4px; }
+.online-provider-dialog .provider-model-discovery { align-items: center; }
+
+/* Persistent feedback belongs beside the canvas navigator, not in the app bar. */
+.canvas-live-status {
+  position: absolute;
+  z-index: 90;
+  right: 28px;
+  bottom: 5px;
+  max-width: min(330px, calc(100vw - 44px));
+  color: #a99b87;
+  font: 10px "Noto Serif SC", "Songti SC", serif;
+  letter-spacing: .045em;
+  pointer-events: none;
+}
+.canvas-live-status span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 700px) {
+  .canvas-live-status { right: 14px; bottom: 5px; max-width: calc(100vw - 28px); }
+}
+.provider-capability-tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.provider-capability-tabs button { min-height: 34px; border: 1px solid #4a3c2b; border-radius: 8px; background: #15120e; color: #b9aa96; }
+.provider-capability-tabs button.active { border-color: #9b7b50; background: #2a2118; color: #f0d8b6; }
+.provider-capability-picker { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 10px 12px; border: 1px solid #3d3428; border-radius: 8px; background: #0e0d0b; color: #b9aa96; }
+.provider-capability-picker > span { color: #e0c59f; }
+.provider-capability-picker label { display: flex; grid-template-columns: none; align-items: center; gap: 5px; }
+.provider-capability-picker input { width: 15px; height: 15px; }
+.manual-model-row { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 8px; }
+.manual-model-row select, .manual-model-row button { min-height: 38px; border: 1px solid #59462f; border-radius: 8px; background: #17130e; color: #dbc3a1; padding: 0 10px; }
+.mcp-config-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); min-height: 430px; border: 1px solid #403426; border-radius: 10px; overflow: hidden; }
+.mcp-config-layout > aside { display: flex; flex-direction: column; gap: 6px; padding: 10px; border-right: 1px solid #403426; background: #0d0c0a; }
+.mcp-config-layout > aside button { display: grid; gap: 3px; text-align: left; min-height: 48px; padding: 9px; border: 1px solid #3c3227; border-radius: 7px; background: #15120e; color: #d7c3a6; }
+.mcp-config-layout > aside button.active { border-color: #9b7b50; background: #2a2118; }
+.mcp-config-layout > aside small { color: #8f8373; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mcp-config-layout > main { display: grid; align-content: start; gap: 11px; padding: 15px; min-width: 0; }
+.mcp-enabled { display: flex !important; grid-template-columns: none !important; flex-direction: row; align-items: center; gap: 8px !important; }
+.mcp-enabled input { width: 16px !important; height: 16px !important; }
+.mcp-tools { display: grid; gap: 6px; max-height: 185px; overflow: auto; padding: 10px; border: 1px solid #3c3227; border-radius: 8px; background: #0b0a09; }
+.mcp-tools header { display: flex; justify-content: space-between; color: #e4c9a2; }
+.mcp-tools > div { display: grid; gap: 2px; padding: 7px 0; border-top: 1px solid #28231c; }
+.mcp-tools small, .mcp-tools p, .mcp-empty small { color: #938777; }
+.mcp-config-layout main > footer { display: flex; justify-content: space-between; }
+.mcp-config-layout button.danger { border-color: #69433b; color: #e1aaa0; }
+.mcp-empty { display: grid; place-items: center; align-content: center; gap: 10px; min-height: 360px; text-align: center; }
+
+/* Theme contract -----------------------------------------------------------
+   This intentionally lives last.  It gives every current and future `.app`
+   surface the same default tokens without changing geometry, stacking or
+   pointer behaviour.  A component may keep a semantic media colour, but must
+   not introduce teal/green as a generic panel or action colour. */
+.app {
+  --ui-bg: var(--cc-black);
+  --ui-panel: var(--cc-surface);
+  --ui-panel-hi: var(--cc-surface-raised);
+  --ui-field: var(--cc-field);
+  --ui-line: var(--cc-border);
+  --ui-line-soft: var(--cc-line-soft);
+  --ui-text: var(--cc-text);
+  --ui-muted: var(--cc-text-muted);
+  --ui-faint: var(--cc-text-faint);
+  --ui-accent: var(--cc-gold);
+  --ui-accent-soft: var(--cc-gold-soft);
+  --ui-amber: var(--cc-gold-strong);
+  --ui-shadow: var(--cc-shadow);
+}
+
+/* Mint remains status-only: it never denotes a general action, selected
+   state, panel, field or port. */
+.app .connection-dot.connected,
+.app .canvas-project-name .connection-dot.connected,
+.app .topbar .brand .connection-dot.connected {
+  color: var(--cc-status-good);
+  background: var(--cc-status-good) !important;
+}
+.app .cinematic-project-name i,
+.app .cinematic-landing-header p i,
+.app .cinematic-outputs footer i {
+  background: var(--cc-status-good);
+}
+.app .connection-dot.disconnected,
+.app .canvas-project-name .connection-dot.disconnected,
+.app .topbar .brand .connection-dot.disconnected {
+  color: var(--cc-status-error);
+  background: var(--cc-status-error) !important;
+}
+
+/* ComfyUI diagnostics stay attached to the workflow card.  They are an
+   inspectable preflight report, rather than a transient toast or a collapsed
+   error string that hides the actual node / slot / type mismatch. */
+.comfy-diagnostic-control { position: absolute; z-index: 46; right: 6px; bottom: 5px; }
+.app .comfy-diagnostic-control > button {
+  min-width: 42px;
+  border-radius: 5px;
+  padding: 3px 5px;
+  font-size: 9px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.app .comfy-diagnostic-control > button.has-errors { border-color: #9e4f46 !important; background: #301714 !important; color: #ffd0c4 !important; }
+.app .comfy-diagnostic-control > button.has-notes { border-color: #796c52 !important; background: #211c14 !important; color: #e6d4b4 !important; }
+.comfy-diagnostic-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 9px);
+  width: min(410px, calc(100vw - 30px));
+  max-height: min(390px, calc(100vh - 72px));
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid #59493a;
+  border-radius: 10px;
+  background: #12100df7;
+  color: #e9dbc7;
+  box-shadow: 0 22px 48px #000d;
+  font: 11px/1.55 "Microsoft YaHei UI", sans-serif;
+  text-align: left;
+  backdrop-filter: blur(12px);
+}
+.comfy-diagnostic-popover > header,
+.comfy-parameter-diagnostics > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px; border-bottom: 1px solid #40372c; }
+.comfy-diagnostic-popover > header span { color: #e7c996; font: 700 9px "Segoe UI", sans-serif; letter-spacing: .1em; }
+.app .comfy-diagnostic-popover > header button,
+.app .comfy-parameter-diagnostics > header > button { min-width: 25px; min-height: 25px; padding: 2px 6px; border-radius: 5px; font-size: 13px; }
+.comfy-diagnostic-intro { margin: 0; padding: 8px 11px; color: #a99b87; font-size: 9px; }
+.comfy-diagnostic-list { display: grid; gap: 7px; overflow: auto; padding: 0 10px 10px; scrollbar-width: thin; }
+.comfy-diagnostic-list article,
+.comfy-parameter-diagnostics article { display: grid; gap: 4px; border: 1px solid #4a4034; border-radius: 7px; padding: 8px; background: #15120e; }
+.comfy-diagnostic-list article.error,
+.comfy-parameter-diagnostics article.error { border-color: #854940; background: #241311; }
+.comfy-diagnostic-list article.warning,
+.comfy-parameter-diagnostics article.warning { border-color: #6d6049; background: #211d15; }
+.comfy-diagnostic-list article > header { display: flex; justify-content: space-between; gap: 8px; padding: 0; border: 0; }
+.comfy-diagnostic-list article b,
+.comfy-parameter-diagnostics article b { color: #f0dbc0; font-size: 10px; }
+.comfy-diagnostic-list article.error b,
+.comfy-parameter-diagnostics article.error b { color: #ffc2b6; }
+.comfy-diagnostic-list code { max-width: 132px; overflow: hidden; color: #9e8c75; font: 8px/1.2 Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.comfy-diagnostic-location,
+.comfy-parameter-diagnostics article > span { color: #d6b886; font-size: 9px; }
+.comfy-diagnostic-types,
+.comfy-parameter-diagnostics article > em { color: #aa9d8a; font-size: 9px; font-style: normal; }
+.comfy-diagnostic-list p,
+.comfy-parameter-diagnostics article p { margin: 0; color: #e1d4c3; font-size: 10px; }
+.comfy-diagnostic-list small,
+.comfy-parameter-diagnostics article small { color: #a9967e; font-size: 9px; line-height: 1.5; }
+.comfy-diagnostic-popover > footer { display: flex; justify-content: flex-end; gap: 6px; border-top: 1px solid #40372c; padding: 8px 10px; }
+.app .comfy-diagnostic-popover > footer button { padding: 5px 8px; border-radius: 5px; font-size: 9px; }
+.app .comfy-diagnostic-popover > footer button.primary { border-color: #f0dfc8 !important; background: #f0dfc8 !important; color: #2a2017 !important; }
+.comfy-parameter-diagnostics { display: grid; max-height: 220px; min-height: 0; margin: 0 15px 11px; overflow: hidden; border: 1px solid #5b4a39; border-radius: 8px; background: #14110d; }
+.comfy-parameter-diagnostics.has-errors { border-color: #84483f; }
+.comfy-parameter-diagnostics > header { padding: 8px 10px; }
+.comfy-parameter-diagnostics > header > div { display: grid; gap: 2px; }
+.comfy-parameter-diagnostics > header b { color: #efc99a; font-size: 10px; }
+.comfy-parameter-diagnostics > header small { color: #968875; font-size: 8px; }
+.comfy-parameter-diagnostics > div { display: grid; gap: 6px; overflow: auto; padding: 8px 10px 10px; scrollbar-width: thin; }
+
+/* Director Mode: the material shelf owns its scroll area.  This final,
+   scoped contract prevents a long library from increasing the shell height or
+   shrinking the edit/preview panes. */
+.director-shell .director-main {
+  flex: 1 1 0;
+  height: auto;
+  min-height: 0;
+  overflow: hidden;
+}
+.director-shell .director-main > .director-script,
+.director-shell .director-main > .director-stage,
+.director-shell .director-main > .director-assets {
+  min-height: 0;
+  max-height: none;
+}
+.director-shell .director-main > .director-assets {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.director-shell .director-assets-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  touch-action: pan-y;
+}
+.director-shell .director-assets-list::-webkit-scrollbar { display: block; width: 7px; }
+.director-shell .director-assets-list::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 99px;
+  background: #7b6d5a;
+  background-clip: padding-box;
+}
+
+/* Portrait composition has a true 9:16 frame; every source remains contained
+   inside it so neither horizontal nor non-9:16 portrait material is stretched. */
+.director-shell .director-stage > .director-preview.is-portrait {
+  width: min(100%, calc((100dvh - 330px) * .5625));
+  height: auto;
+  min-height: 0;
+  max-width: 100%;
+  max-height: 100%;
+  aspect-ratio: 9 / 16;
+  justify-self: center;
+  align-self: center;
+}
+.director-shell .director-stage > .director-preview img,
+.director-shell .director-stage > .director-preview video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain !important;
+  object-position: center;
 }

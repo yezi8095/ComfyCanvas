@@ -1,5 +1,5 @@
 import { ChangeEvent, useMemo, useRef, useState } from "react";
-import { COMFY_WORKFLOW_STORE, readComfyWorkflowLibrary, scanComfyParameters, type StoredComfyWorkflow } from "./ComfyWorkflowParameters";
+import { COMFY_WORKFLOW_STORE, readComfyWorkflowLibrary, scanComfyParameters, scanComfyWorkflowInterface, type StoredComfyWorkflow } from "./ComfyWorkflowParameters";
 
 const detectFormat = (value: unknown): "workflow" | "api" | null => {
   if (!value || typeof value !== "object") return null;
@@ -147,12 +147,15 @@ export default function WorkflowLibrary({
   };
 
   const scanParameters = async (item: StoredComfyWorkflow) => {
-    const apiContent = item.format === "api" ? item.content : workflowToApi(item.content, await getObjectInfo());
+    const objectInfo = await getObjectInfo();
+    const apiContent = item.format === "api" ? item.content : workflowToApi(item.content, objectInfo);
     const scanned = scanComfyParameters(apiContent);
     const previous = new Map((item.parameters || []).map((parameter) => [parameter.id, parameter]));
     const parameters = scanned.map((parameter) => previous.has(parameter.id) ? { ...parameter, ...previous.get(parameter.id), value: parameter.value } : parameter);
-    saveItems(items.map((candidate) => candidate.id === item.id ? { ...candidate, apiContent, parameters, updatedAt: Date.now() } : candidate));
-    setMessage(`已扫描 ${scanned.length} 个输入，默认发布 ${parameters.filter((parameter) => parameter.enabled).length} 个常用参数`);
+    const interfaceSnapshot = scanComfyWorkflowInterface(apiContent, objectInfo);
+    saveItems(items.map((candidate) => candidate.id === item.id ? { ...candidate, apiContent, parameters, interface: interfaceSnapshot, updatedAt: Date.now() } : candidate));
+    const slotCount = Object.values(interfaceSnapshot.nodes).reduce((total, node) => total + node.inputs.length + node.outputs.length, 0);
+    setMessage(`已按 ComfyUI 真实类型扫描 ${scanned.length} 个参数、${slotCount} 个输入/输出插槽；运行时会再次读取当前接口。`);
   };
   const updateParameter = (workflowId: string, parameterId: string, patch: Record<string, unknown>) => {
     saveItems(items.map((item) => item.id === workflowId ? {
@@ -189,7 +192,7 @@ export default function WorkflowLibrary({
             <label>标签<input value={current.tags.join("，")} onChange={(event) => saveItems(items.map((item) => item.id === current.id ? { ...item, tags: event.target.value.split(/[，,]/).map((tag) => tag.trim()).filter(Boolean), updatedAt: Date.now() } : item))} placeholder="例如：文生图，FLUX，写实" /></label>
             <div className="workflow-json-summary"><b>结构检查</b><span>{current.format === "workflow" ? `${(current.content as any)?.nodes?.length || 0} 个节点 · ${(current.content as any)?.links?.length || 0} 条连接` : `${Object.keys((current.content as any)?.prompt || current.content || {}).length} 个 API 节点`}</span><small>导出另一种格式时会使用当前 ComfyUI 的 `/object_info` 补全节点定义。</small></div>
             <section className="workflow-parameter-editor">
-              <header><div><b>生成参数</b><small>勾选后会显示在 AI 生成面板中；运行时只修改工作流副本</small></div><button onClick={() => void scanParameters(current)}>{current.parameters?.length ? "重新扫描" : "扫描参数"}</button></header>
+              <header><div><b>生成参数</b><small>创作页默认只展示提示词、参考、尺寸、时长与模型；采样器、CFG、Seed、VAE 等在这里管理</small></div><button onClick={() => void scanParameters(current)}>{current.parameters?.length ? "重新扫描接口" : "扫描接口"}</button></header>
               {current.parameters?.length ? <div className="workflow-parameter-list">{current.parameters.map((parameter) => <article className={parameter.enabled ? "enabled" : ""} key={parameter.id}>
                 <input type="checkbox" checked={parameter.enabled} onChange={(event) => updateParameter(current.id, parameter.id, { enabled: event.target.checked })} />
                 <div><input className="workflow-parameter-label" value={parameter.label} onChange={(event) => updateParameter(current.id, parameter.id, { label: event.target.value })} /><small>{parameter.nodeTitle} · {parameter.input}</small></div>

@@ -1,0 +1,30 @@
+/*
+ * Visual tokens for the default "noir editorial" theme.
+ *
+ * Keep product-state colours deliberately small: brass/ivory are the only
+ * general interaction accents; the muted green and red tokens are reserved
+ * for connection/success and error states respectively. Components should
+ * consume these tokens instead of introducing a second teal palette.
+ */
+:root {
+  --cc-black: #090807;
+  --cc-black-raised: #100e0b;
+  --cc-surface: #15120e;
+  --cc-surface-raised: #1b1712;
+  --cc-surface-hover: #2a2118;
+  --cc-field: #0d0c0a;
+  --cc-border: #4c4134;
+  --cc-border-strong: #6b5941;
+  --cc-line-soft: #29251f;
+  --cc-text: #eee1cc;
+  --cc-text-muted: #a99b88;
+  --cc-text-faint: #74695c;
+  --cc-gold: #b89a6d;
+  --cc-gold-strong: #d2a76c;
+  --cc-gold-soft: #2a2118;
+  --cc-ivory: #f0dfc8;
+  --cc-ivory-bright: #fff0d8;
+  --cc-status-good: #7fa99d;
+  --cc-status-error: #ca7167;
+  --cc-shadow: #000000de;
+}
