@@ -3504,6 +3504,25 @@ fn existing_workspace_assets_directory<R: tauri::Runtime>(
     authorize_workspace_assets_directory(app, &assets).map(Some)
 }
 
+#[tauri::command]
+fn delete_workspace_project_assets(
+    app: tauri::AppHandle,
+    project_id: String,
+) -> Result<bool, String> {
+    let project_id = validate_workspace_identifier(&project_id, "项目 ID")?;
+    let Some(assets_dir) = existing_workspace_assets_directory(&app, &project_id)? else {
+        return Ok(false);
+    };
+    fs::remove_dir_all(&assets_dir).map_err(|error| format!("无法删除项目素材：{error}"))?;
+    if let Some(project_dir) = assets_dir.parent() {
+        // The project directory contains only the managed assets directory.
+        // Remove it when empty, but never turn an unrelated future metadata
+        // file into a project deletion failure.
+        let _ = fs::remove_dir(project_dir);
+    }
+    Ok(true)
+}
+
 /// List metadata only from one exact app-managed project directory. The
 /// renderer cannot supply a path, so this command cannot enumerate arbitrary
 /// folders on the machine.
@@ -3982,6 +4001,7 @@ fn main() {
             abort_workspace_asset,
             list_workspace_assets,
             delete_workspace_asset,
+            delete_workspace_project_assets,
             write_export_chunk,
             ffmpeg_available,
             transcode_webm

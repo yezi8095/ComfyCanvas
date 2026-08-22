@@ -79,7 +79,7 @@ import { mergeImportedComfyWorkflows } from "./core/project/comfyWorkflowImport"
 import { validateNewLink, type NewLinkOptions } from "./core/graph/validation";
 import {
   loadProjectWorkspace,
-  removeProjectDocument,
+  removeDeletedProjectStorage,
   saveProjectIndex,
   saveProjectWorkspace,
   type ProjectWorkspaceSnapshot,
@@ -4191,19 +4191,45 @@ export default function App() {
     setMessage("历史项目已打开");
   };
   const deleteHistoryProject = (id: string) => {
-    if (id === historyId) {
-      setMessage("当前正在编辑的项目不能删除，请先打开其他项目");
-      return;
-    }
+    const deletingActive = id === historyIdRef.current;
     const nextHistory = historyProjectsRef.current.filter((item) => item.id !== id);
     try {
-      // Keep the index authoritative before removing the document. If storage
-      // is full or unavailable, leave both the visible history and its file
-      // untouched instead of creating a dangling index entry.
-      saveProjectIndex(localStorage, nextHistory);
-      removeProjectDocument(localStorage, id);
-      historyProjectsRef.current = nextHistory;
-      setHistoryProjects(nextHistory);
+      let retainedHistory = nextHistory;
+      if (deletingActive) {
+        // Deleting the document currently on screen used to be blocked, which
+        // made the last remaining history card impossible to remove. Commit a
+        // fresh empty project first so autosave and close handlers always have
+        // a valid active identity, then retire the requested project.
+        const replacementId = newId();
+        const replacementName = "未命名项目";
+        const replacementProject = starter();
+        const saved = saveProjectWorkspace(localStorage, {
+          id: replacementId,
+          name: replacementName,
+          updatedAt: Date.now(),
+          project: replacementProject,
+        }, nextHistory);
+        retainedHistory = saved.records;
+        removeDeletedProjectStorage(localStorage, id, true);
+        undoHistory.current = [];
+        activateProjectIdentity(replacementId, replacementName, replacementProject);
+        setProject(replacementProject);
+        setHistoryId(replacementId);
+        setProjectName(replacementName);
+        resetProjectSession();
+      } else {
+        // Keep the index authoritative before removing the document. If
+        // storage is full, leave the visible history and document untouched.
+        saveProjectIndex(localStorage, nextHistory);
+        removeDeletedProjectStorage(localStorage, id);
+      }
+      historyProjectsRef.current = retainedHistory;
+      setHistoryProjects(retainedHistory);
+      if (isTauri()) {
+        void import("@tauri-apps/api/core")
+          .then(({ invoke }) => invoke("delete_workspace_project_assets", { projectId: id }))
+          .catch((error) => setLogs((current) => [...current, `项目素材清理失败：${String(error)}`]));
+      }
       setMessage("历史项目已删除");
     } catch {
       setMessage("历史项目删除失败，请导出项目后检查本机存储空间");

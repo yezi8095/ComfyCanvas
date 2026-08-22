@@ -133,6 +133,31 @@ export const removeProjectDocument = (storage: StoragePort, id: string) => {
   storage.removeItem(projectDocumentKey(id));
 };
 
+/**
+ * Remove a project after the caller has already committed an index which no
+ * longer references it. Legacy history is pruned as well, otherwise an old v1
+ * record can reappear the next time the application starts.
+ */
+export const removeDeletedProjectStorage = (
+  storage: StoragePort,
+  id: string,
+  removeLegacyCurrent = false,
+) => {
+  removeProjectDocument(storage, id);
+  const legacy = parseJson<unknown>(storage, LEGACY_HISTORY_KEY, []);
+  if (Array.isArray(legacy)) {
+    const retained = legacy.filter((item) => !isRecord(item) || item.id !== id);
+    if (retained.length !== legacy.length) {
+      if (retained.length) storage.setItem(LEGACY_HISTORY_KEY, JSON.stringify(retained));
+      else storage.removeItem(LEGACY_HISTORY_KEY);
+    }
+  }
+  if (removeLegacyCurrent) {
+    storage.removeItem(LEGACY_CURRENT_PROJECT_KEY);
+    storage.removeItem(LEGACY_PROJECT_NAME_KEY);
+  }
+};
+
 export interface SaveProjectWorkspaceResult {
   /** The exact records retained in the new index, ordered with the active one first. */
   records: ProjectHistoryRecord[];

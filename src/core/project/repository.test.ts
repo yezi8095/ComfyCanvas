@@ -12,6 +12,7 @@ import {
   isLegacyProjectFullyRepresented,
   loadProjectWorkspace,
   projectDocumentKey,
+  removeDeletedProjectStorage,
   removeProjectDocument,
   saveProjectDocument,
   saveProjectIndex,
@@ -265,6 +266,27 @@ describe("project repository", () => {
     expect(storage.getItem(projectDocumentKey("project-b"))).not.toBeNull();
     expect(storage.getItem(ACTIVE_PROJECT_KEY)).toBe("project-a");
     expect(storage.getItem(PROJECT_INDEX_KEY)).not.toBeNull();
+  });
+
+  it("removes a deleted project from legacy history so it cannot reappear", () => {
+    const storage = new MemoryStorage({
+      [projectDocumentKey("old")]: JSON.stringify(makeProject("old-node")),
+      [LEGACY_HISTORY_KEY]: JSON.stringify([
+        { id: "old", name: "旧项目", updatedAt: 1, project: makeProject("old-node") },
+        { id: "keep", name: "保留项目", updatedAt: 2, project: makeProject("keep-node") },
+      ]),
+      [LEGACY_CURRENT_PROJECT_KEY]: JSON.stringify(makeProject("old-node")),
+      [LEGACY_PROJECT_NAME_KEY]: "旧项目",
+    });
+
+    removeDeletedProjectStorage(storage, "old", true);
+
+    expect(storage.getItem(projectDocumentKey("old"))).toBeNull();
+    expect(JSON.parse(storage.getItem(LEGACY_HISTORY_KEY) || "[]")).toEqual([
+      expect.objectContaining({ id: "keep" }),
+    ]);
+    expect(storage.getItem(LEGACY_CURRENT_PROJECT_KEY)).toBeNull();
+    expect(storage.getItem(LEGACY_PROJECT_NAME_KEY)).toBeNull();
   });
 
   it("persists an active document with a capped index and cleans only known truncated documents", () => {
