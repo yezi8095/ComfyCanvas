@@ -30,6 +30,7 @@ describe("inferCompatiblePorts", () => {
   it.each([
     ["text", "aiImage", "text", "prompt"],
     ["image", "onlineVideo", "image", "firstFrame"],
+    ["image", "video", "image", "firstFrame"],
     ["text", "onlineVideo", "text", "prompt"],
     ["image", "aiText", "image", "references"],
   ] as const)("allows %s -> %s", (fromKind, toKind, fromPort, toPort) => {

@@ -13,6 +13,7 @@ export type WorkspaceAssetCommand =
   | "append_workspace_asset_chunk"
   | "commit_workspace_asset"
   | "abort_workspace_asset"
+  | "import_workspace_asset_from_path"
   | "cache_comfy_output_media"
   | "list_workspace_assets"
   | "delete_workspace_asset";
@@ -105,6 +106,14 @@ export interface CacheComfyOutputMediaRequest {
   subfolder?: string;
   projectId: string;
   assetId: string;
+}
+
+export interface ImportWorkspaceAssetFromPathRequest {
+  projectId: string;
+  assetId: string;
+  sourcePath: string;
+  fileName: string;
+  mimeType?: string;
 }
 
 export type WorkspaceAssetUploadStage = "validate" | "begin" | "read" | "append" | "commit";
@@ -384,6 +393,40 @@ export const uploadWorkspaceAsset = async (
   } catch (error) {
     return failAfterBegin("commit", error);
   }
+};
+
+/**
+ * Import a file path emitted by Tauri's native drop event without routing a
+ * large video through WebView memory. The Rust side accepts only exact paths
+ * that Tauri authorized for this user drop.
+ */
+export const importWorkspaceAssetFromPath = async (
+  input: ImportWorkspaceAssetFromPathRequest,
+  options: WorkspaceAssetCommandOptions = {},
+): Promise<ManagedWorkspaceAsset> => {
+  validateManagedAssetIdentity(input.projectId, input.assetId);
+  const sourcePath = input.sourcePath.trim();
+  if (!sourcePath) throw new Error("拖入素材路径不能为空");
+  const fileName = input.fileName.trim();
+  if (!fileName || /[/\\\0]/.test(fileName)) throw new Error("拖入素材文件名无效");
+  const mimeType = input.mimeType?.trim() || "application/octet-stream";
+  const invoke = options.invoke || invokeDesktopWorkspaceAsset;
+  const response = await invoke("import_workspace_asset_from_path", {
+    projectId: input.projectId,
+    assetId: input.assetId,
+    filename: fileName,
+    mimeType,
+    sourcePath,
+  });
+  const asset = normalizeManagedWorkspaceAsset(response, {
+    projectId: input.projectId,
+    assetId: input.assetId,
+    fileName,
+    mimeType,
+    size: 0,
+  });
+  if (!asset.localPath) throw new Error("桌面媒体仓储没有返回拖入素材路径");
+  return asset;
 };
 
 /**

@@ -199,8 +199,18 @@ const hasManagedMediaSource = (value: Record<string, unknown>) =>
   typeof value.src === "string" && Boolean(value.src.trim()) &&
   !/^data:/i.test(value.src);
 
-const serializeProjectDocument = (project: CanvasProject) =>
-  JSON.stringify(normalizeProject(project));
+const serializedProjectDocumentCache = new WeakMap<CanvasProject, string>();
+
+const serializeProjectDocument = (project: CanvasProject) => {
+  const cached = serializedProjectDocumentCache.get(project);
+  if (cached !== undefined) return cached;
+  const serialized = JSON.stringify(normalizeProject(project));
+  // Project updates are immutable. Historical project objects therefore keep
+  // a stable serialized form and do not need to be normalized/stringified on
+  // every autosave of a different active project.
+  serializedProjectDocumentCache.set(project, serialized);
+  return serialized;
+};
 
 const saveProjectDocumentVerified = (
   storage: StoragePort,
@@ -304,6 +314,12 @@ export const cleanupFullyMigratedLegacyProjectKeys = (
     current: storage.getItem(LEGACY_CURRENT_PROJECT_KEY) === null ? "missing" : "retained",
     history: storage.getItem(LEGACY_HISTORY_KEY) === null ? "missing" : "retained",
   };
+  // This is the steady state after migration. Previously every save still
+  // stable-sorted and serialized the active project twice just to discover
+  // that no legacy rollback data remained.
+  if (retained.current === "missing" && retained.history === "missing") {
+    return { ...retained, verifiedV2: true };
+  }
   if (storage.getItem(ACTIVE_PROJECT_KEY) !== expectedActive.id) return retained;
 
   const indexValue = readStoredJson(storage, PROJECT_INDEX_KEY);

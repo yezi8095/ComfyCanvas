@@ -22,6 +22,9 @@ export interface ProviderConfig {
   capabilities?: ModelCapability[];
   custom?: boolean;
   detectedModels?: ProviderModel[];
+  /** One optional default per node type. The legacy `model` field remains for
+   * old projects and adapters that only expose a single model. */
+  defaultModels?: Partial<Record<ModelCapability, string>>;
 }
 
 export type ProviderConfigs = Record<string, ProviderConfig>;

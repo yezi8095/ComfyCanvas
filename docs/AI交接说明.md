@@ -15,7 +15,7 @@
 3. 生成的图片/视频必须自动显示在画布上；视频必须能在画布内播放。
 4. 节点连线必须真实传递兼容类型，不能只是一条视觉线。
 5. 任何不兼容的连接要在连线时给出明确原因和下一步建议，不能静默失败。
-6. 程序还在开发阶段：**不要构建安装包或宣称已交付成品**。仅在用户要求测试时构建单个测试 EXE。
+6. 程序仍在持续开发。默认只构建单个测试 EXE；用户明确要求发布时，可以构建安装包、便携 ZIP 并发布 GitHub Release，但不能把未完成的真实平台验收描述为已经通过。
 
 ## 3. 工作目录与重要路径
 
@@ -166,7 +166,7 @@ cargo test --locked --manifest-path src-tauri\Cargo.toml
 
 支持 `--help` 与 `--check`。脚本保持 ASCII，避免 Windows cmd 解析 UTF-8 中文导致启动失败。
 
-构建**单个测试 EXE**（不是安装包）必须使用：
+构建单个测试 EXE 必须使用：
 
 ```powershell
 cd D:\Codex\ComfyCanvas-workspace
@@ -174,6 +174,8 @@ npm.cmd exec tauri build -- --no-bundle
 ```
 
 不要只运行 `cargo build --release` 后把 exe 交给用户；它曾因未打包前端而访问 `127.0.0.1:1430` 并出现 `ERR_CONNECTION_REFUSED`。
+
+用户明确要求正式发布时，使用 `npm.cmd run tauri -- build` 生成 NSIS 安装包；便携 ZIP 必须同时包含构建后的主程序和 `ffmpeg.exe`。
 
 ## 11. 当前未完成/必须优先验证的事项
 

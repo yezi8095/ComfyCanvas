@@ -304,7 +304,7 @@ function emptyData(): Data {
 function read(projectId: string): LoadResult<Data> {
   try {
     const scoped = localStorage.getItem(storeKey(projectId));
-    // 只迁移一次旧的全局导演台内容，之后每个画布项目都拥有独立时间线。
+    // 只迁移一次旧的全局粗剪预览内容，之后每个画布项目都拥有独立时间线。
     const legacy = scoped || localStorage.getItem(MIGRATION_KEY)
       ? null
       : localStorage.getItem(LEGACY_STORE);
@@ -313,7 +313,7 @@ function read(projectId: string): LoadResult<Data> {
       try {
         localStorage.setItem(MIGRATION_KEY, "1");
       } catch {
-        warning = "旧导演台内容已读入，但无法写入迁移标记；请在清理浏览器存储空间后点击“重试保存”。";
+        warning = "旧粗剪预览内容已读入，但无法写入迁移标记；请在清理浏览器存储空间后点击“重试保存”。";
       }
     }
     const parsed: unknown = JSON.parse(scoped || legacy || "{}");
@@ -1464,12 +1464,12 @@ export default function DirectorMode({
     // not turn it into a misleading persistent entry.
     if (!managed.localPath) {
       await cleanupUnattachedWorkspaceAsset(managed, [directorAssets]);
-      throw new Error("桌面素材仓储没有返回本机文件路径；素材未加入导演台");
+      throw new Error("桌面素材仓储没有返回本机文件路径；素材未加入粗剪预览");
     }
     const src = sourceForNode({ localPath: managed.localPath });
     if (!src) {
       await cleanupUnattachedWorkspaceAsset(managed, [directorAssets]);
-      throw new Error("桌面素材仓储返回的文件路径无效；素材未加入导演台");
+      throw new Error("桌面素材仓储返回的文件路径无效；素材未加入粗剪预览");
     }
     const dimensions = await readMediaDimensions(kind, src);
     return {
@@ -1557,8 +1557,8 @@ export default function DirectorMode({
     if (!created.length) {
       setStorageRecoveryNotice(
         browserSessionFallback
-          ? "浏览器预览模式无法保存独立素材；文件未加入导演台，请在桌面版重新导入。"
-          : `素材未加入导演台：${failures.slice(0, 2).join("；") || "文件无法读取"}。原始文件未被删除，可修复后重试。`,
+          ? "浏览器预览模式无法保存独立素材；文件未加入粗剪预览，请在桌面版重新导入。"
+          : `素材未加入粗剪预览：${failures.slice(0, 2).join("；") || "文件无法读取"}。原始文件未被删除，可修复后重试。`,
       );
       return;
     }
@@ -1572,7 +1572,7 @@ export default function DirectorMode({
         }`,
       );
     } else if (failures.length) {
-      setStorageRecoveryNotice(`${failures.length} 个素材未保存到桌面仓储，未加入导演台；原始文件未被删除，可修复后重试。`);
+      setStorageRecoveryNotice(`${failures.length} 个素材未保存到桌面仓储，未加入粗剪预览；原始文件未被删除，可修复后重试。`);
     } else {
       setStorageRecoveryNotice(null);
     }
@@ -1582,7 +1582,7 @@ export default function DirectorMode({
     try {
       const { open: chooseDirectory } = await import("@tauri-apps/plugin-dialog");
       const chosen = await chooseDirectory({
-        title: "选择导演台导出存放位置",
+        title: "选择粗剪预览导出存放位置",
         directory: true,
         multiple: false,
         defaultPath: exportDirectory || undefined,
@@ -1850,7 +1850,7 @@ export default function DirectorMode({
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
       const extension = settings.format;
-      const filename = "亿幕导演台-" + new Date().toISOString().slice(0, 10) + "." + extension;
+      const filename = "亿幕粗剪预览-" + new Date().toISOString().slice(0, 10) + "." + extension;
       let defaultPath = filename;
       if (settings.directory) {
         const { join } = await import("@tauri-apps/api/path");
@@ -2118,8 +2118,8 @@ export default function DirectorMode({
       <section className="director-shell" onPointerDown={(event) => { event.stopPropagation(); setMenu(null); setTrackMenu(null); setTrackChooser(false); }}>
         <header className="director-head">
           <div>
-            <span>导演模式</span>
-            <b>导演台</b>
+            <span>剪辑工作区</span>
+            <b>粗剪预览</b>
             <small>时间线剪辑 · 空格播放 · Ctrl+Z 撤销</small>
           </div>
           <div className="director-head-actions">
@@ -2127,7 +2127,7 @@ export default function DirectorMode({
             <button className="director-export" onClick={() => setExportDialog(true)} disabled={exporting}>
               {exporting ? "导出中…" : "导出"}
             </button>
-            <button onClick={onClose}>退出导演台</button>
+            <button onClick={onClose}>退出粗剪预览</button>
           </div>
         </header>
 
@@ -2168,11 +2168,11 @@ export default function DirectorMode({
 
         <div className="director-main">
           <aside className="director-script">
-            <b>脚本 / 导演笔记</b>
+            <b>脚本 / 剪辑笔记</b>
             <textarea
               value={data.script}
               onChange={(event) => commit((current) => ({ ...current, script: event.target.value }))}
-              placeholder="输入剧本、台词、镜头说明或导演笔记…"
+              placeholder="输入剧本、台词、镜头说明或剪辑笔记…"
             />
             <section className="director-text-settings" aria-label="文字基础设置">
               <div>
@@ -2709,7 +2709,7 @@ export default function DirectorMode({
           <div className="director-shortcuts-backdrop" onPointerDown={() => setShortcutsOpen(false)}>
             <section className="director-shortcuts-dialog" onPointerDown={(event) => event.stopPropagation()}>
               <div>
-                <span>导演台</span>
+                <span>粗剪预览</span>
                 <b>快捷键</b>
                 <small>当前可用的时间线编辑操作</small>
               </div>
@@ -2737,7 +2737,7 @@ export default function DirectorMode({
               }}
             >
               <div>
-                <span>导演台导出</span>
+                <span>粗剪预览导出</span>
                 <b>导出参数</b>
                 <small>码率使用默认高质量设置；MP4 与 MOV 将由 FFmpeg 转码。</small>
               </div>

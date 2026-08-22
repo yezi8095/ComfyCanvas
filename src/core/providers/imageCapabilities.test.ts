@@ -57,6 +57,17 @@ describe("image provider capabilities", () => {
     expect(errors.join(" ")).toContain("4 张");
   });
 
+  it("ignores a legacy quality value when the provider has no quality parameter", () => {
+    const caps = imageCapabilitiesFor("阿里百炼·万相", "qwen-image-3.0-pro");
+    expect(caps.qualities).toEqual([]);
+    expect(validateImageGenerationOptions(caps, {
+      ratio: "9:16",
+      resolution: "1080x1920",
+      amount: 1,
+      quality: "low",
+    })).toEqual([]);
+  });
+
   it("normalizes stale UI options to a real provider request", () => {
     const caps = imageCapabilitiesFor("OpenAI", "gpt-image-1");
     expect(normalizeImageGenerationOptions(caps, {

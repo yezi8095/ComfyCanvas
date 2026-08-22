@@ -421,22 +421,22 @@ const inspectDirector = (
   });
 
   if (rawAssets !== undefined && !Array.isArray(rawAssets)) {
-    addItem(items, { status: "missing", category: "directorAsset", code: "director-asset-invalid", label: "导演台素材库", message: "导演台素材库不是数组，无法恢复。" });
+    addItem(items, { status: "missing", category: "directorAsset", code: "director-asset-invalid", label: "粗剪预览素材库", message: "粗剪预览素材库不是数组，无法恢复。" });
   } else if (Array.isArray(rawAssets)) {
     const seen = new Set<string>();
     rawAssets.forEach((candidate, index) => {
       if (!isRecord(candidate)) {
-        addItem(items, { status: "missing", category: "directorAsset", code: "director-asset-invalid", label: `导演台素材 #${index + 1}`, message: "素材描述不是对象，无法恢复。" });
+        addItem(items, { status: "missing", category: "directorAsset", code: "director-asset-invalid", label: `粗剪预览素材 #${index + 1}`, message: "素材描述不是对象，无法恢复。" });
         return;
       }
       const id = stringValue(candidate.id);
-      const name = stringValue(candidate.name) || (id ? `素材 ${id}` : `导演台素材 #${index + 1}`);
+      const name = stringValue(candidate.name) || (id ? `素材 ${id}` : `粗剪预览素材 #${index + 1}`);
       if (!id) {
-        addItem(items, { status: "missing", category: "directorAsset", code: "director-asset-invalid", label: name, message: "导演台素材缺少 ID，时间线无法引用。" });
+        addItem(items, { status: "missing", category: "directorAsset", code: "director-asset-invalid", label: name, message: "粗剪预览素材缺少 ID，时间线无法引用。" });
         return;
       }
       if (seen.has(id)) {
-        addItem(items, { status: "missing", category: "directorAsset", code: "director-asset-duplicate", label: name, subjectId: id, message: "导演台素材 ID 重复，时间线无法确定所用文件。" });
+        addItem(items, { status: "missing", category: "directorAsset", code: "director-asset-duplicate", label: name, subjectId: id, message: "粗剪预览素材 ID 重复，时间线无法确定所用文件。" });
         return;
       }
       seen.add(id);
@@ -444,20 +444,20 @@ const inspectDirector = (
       if (source === "canvas") {
         const node = mediaNodes.get(id);
         if (!node) {
-          addItem(items, { status: "missing", category: "directorAsset", code: "director-canvas-node-missing", label: name, subjectId: id, message: "导演台素材指向的画布媒体节点不存在。" });
+          addItem(items, { status: "missing", category: "directorAsset", code: "director-canvas-node-missing", label: name, subjectId: id, message: "粗剪预览素材指向的画布媒体节点不存在。" });
           assetStates.set(id, { status: "missing", label: name });
           return;
         }
         const assessment = sourceAssessment(node);
         addItem(items, toItem("directorAsset", name, id, {
           ...assessment,
-          message: assessment.status === "portable" ? "导演台引用画布素材，画布素材可随项目恢复。" : `导演台引用画布素材：${assessment.message}`,
+          message: assessment.status === "portable" ? "粗剪预览引用画布素材，画布素材可随项目恢复。" : `粗剪预览引用画布素材：${assessment.message}`,
         }));
         assetStates.set(id, { status: assessment.status, label: name });
         return;
       }
       if (source !== "external") {
-        addItem(items, { status: "missing", category: "directorAsset", code: "director-asset-invalid", label: name, subjectId: id, message: "导演台素材来源未知，无法确定如何恢复。" });
+        addItem(items, { status: "missing", category: "directorAsset", code: "director-asset-invalid", label: name, subjectId: id, message: "粗剪预览素材来源未知，无法确定如何恢复。" });
         assetStates.set(id, { status: "missing", label: name });
         return;
       }
@@ -474,19 +474,19 @@ const inspectDirector = (
 
   if (director === undefined || director === null) return;
   if (!isRecord(director)) {
-    addItem(items, { status: "missing", category: "directorTimeline", code: "director-asset-invalid", label: "导演台时间线", message: "导演台时间线不是对象，无法恢复。" });
+    addItem(items, { status: "missing", category: "directorTimeline", code: "director-asset-invalid", label: "粗剪预览时间线", message: "粗剪预览时间线不是对象，无法恢复。" });
     return;
   }
   (["timeline", "audio"] as const).forEach((track) => {
     const clips = director[track];
     if (clips === undefined) return;
     if (!Array.isArray(clips)) {
-      addItem(items, { status: "missing", category: "directorTimeline", code: "director-asset-invalid", label: `导演台${track === "audio" ? "音频" : "视频"}轨道`, message: "轨道片段不是数组，无法恢复。" });
+      addItem(items, { status: "missing", category: "directorTimeline", code: "director-asset-invalid", label: `粗剪预览${track === "audio" ? "音频" : "视频"}轨道`, message: "轨道片段不是数组，无法恢复。" });
       return;
     }
     clips.forEach((candidate, index) => {
       const assetId = isRecord(candidate) ? stringValue(candidate.assetId) : "";
-      const label = `导演台${track === "audio" ? "音频" : "视频"}片段 ${index + 1}`;
+      const label = `粗剪预览${track === "audio" ? "音频" : "视频"}片段 ${index + 1}`;
       const asset = assetId ? assetStates.get(assetId) : undefined;
       if (!asset) {
         addItem(items, { status: "missing", category: "directorTimeline", code: "director-timeline-asset-missing", label, subjectId: assetId || undefined, message: "时间线片段找不到对应素材，导入后无法播放。" });

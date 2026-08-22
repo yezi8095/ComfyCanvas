@@ -183,6 +183,9 @@ button,
 }
 .setting-path { display: flex; gap: 7px; }
 .setting-path input { min-width: 0; flex: 1; }
+.setting-path input[readonly] { color: #c6d5d3; cursor: default; }
+.setting-path button:disabled { opacity: .45; cursor: default; }
+.managed-asset-help { margin-top: -4px; font-size: 10px; }
 .setting-path button,
 .theme-options button {
   border: 1px solid #466164;
@@ -413,8 +416,8 @@ button,
 .online-api-menu small { padding: 2px 4px 5px; color: #8ca4a3; font-size: 10px; line-height: 1.4; }
 .online-api-menu button { padding: 6px 7px; border-radius: 4px; color: #e1f1ef; text-align: left; font-size: 12px; }
 .online-api-menu button:hover { background: #294345; }
-.online-provider-backdrop { position: fixed; z-index: 260; inset: 0; display: grid; place-items: center; padding: 20px; background: #06101191; }
-.online-provider-dialog { box-sizing: border-box; width: min(440px, calc(100vw - 36px)); display: grid; gap: 11px; padding: 18px; border: 1px solid #557575; border-radius: 14px; background: #172224; box-shadow: 0 26px 70px #000c; color: #e7f1ef; font-family: "Microsoft YaHei UI", sans-serif; }
+.online-provider-backdrop { position: fixed; z-index: 260; inset: 0; display: grid; place-items: end; padding: 0 22px 22px 0; background: transparent; pointer-events: none; }
+.online-provider-dialog { box-sizing: border-box; width: min(430px, calc(100vw - 36px)); max-height: min(760px, calc(100vh - 44px)); overflow-y: auto; display: grid; gap: 11px; padding: 18px; border: 1px solid #557575; border-radius: 14px; background: #172224; box-shadow: 0 26px 70px #000c; color: #e7f1ef; font-family: "Microsoft YaHei UI", sans-serif; pointer-events: auto; }
 .online-provider-dialog header { display: flex; justify-content: space-between; gap: 14px; align-items: start; margin-bottom: 2px; }
 .online-provider-dialog header div { display: grid; gap: 3px; }
 .online-provider-dialog header span { color: #7ce4d3; font-size: 12px; }
@@ -423,6 +426,11 @@ button,
 .online-provider-tabs { display: flex; gap: 7px; padding: 3px; border: 1px solid #3e5556; border-radius: 9px; background: #10191a; }
 .online-provider-tabs button { flex: 1; min-height: 34px; border: 0; border-radius: 6px; background: transparent; color: #aebfbd; font: 13px "Microsoft YaHei UI", sans-serif; }
 .online-provider-tabs button.active { background: #315954; color: #effcf9; box-shadow: inset 0 0 0 1px #6ed5c2; }
+.provider-capability-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.provider-capability-tabs button { min-height: 34px; border: 1px solid #4a4134; border-radius: 7px; background: #15130f; color: #b9ad98; font: 12px "Microsoft YaHei UI", sans-serif; cursor: pointer; }
+.provider-capability-tabs button.active { border-color: #b1905d; background: #302518; color: #f1d5a0; box-shadow: inset 3px 0 #c6a46a; }
+.provider-scope-note { display: block; margin-top: -2px; color: #918573; font-size: 10px; line-height: 1.45; }
+.provider-scope-note strong { margin: 0 2px; color: #e1c48e; font-weight: 600; }
 .cloud-config-status { border: 1px solid #5b5650; border-radius: 7px; padding: 9px 10px; background: #292724; color: #d8cda7; font-size: 12px; }
 .cloud-config-status.configured { border-color: #4d8279; background: #1f3432; color: #86e3d3; }
 .online-provider-dialog label { display: grid; gap: 5px; color: #c8d7d5; font-size: 12px; }
@@ -433,7 +441,7 @@ button,
 .provider-select-row button,.custom-provider-add button,.provider-model-discovery button { flex: none; border: 1px solid #50706c; border-radius: 7px; padding: 0 10px; background: #233b38; color: #a9eee1; }
 .custom-provider-add { display: flex; gap: 7px; }
 .custom-provider-add input { flex: 1; min-width: 0; }
-.provider-model-discovery { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); align-items: center; gap: 9px; }
+.provider-model-discovery { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 9px; }
 .provider-model-discovery button { height: 34px; }
 .provider-model-discovery button:disabled { opacity: .45; cursor: default; }
 .provider-model-discovery small { color: #829895; font-size: 10px; line-height: 1.4; }
@@ -813,6 +821,7 @@ button,
   min-width: 4800px;
   min-height: 3200px;
   transform-origin: 0 0;
+  contain: layout style;
 }
 .wires {
   position: absolute;
@@ -849,6 +858,7 @@ button,
   box-shadow: 0 15px 30px #0007;
   user-select: none;
   overflow: visible;
+  contain: layout style;
 }
 .node.api {
   min-width: 156px;
@@ -990,6 +1000,18 @@ button,
   -webkit-user-drag: none;
   cursor: grab;
 }
+.canvas-video-sleep {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 7px;
+  text-align: center;
+  color: #b9aaa0;
+  background: linear-gradient(145deg, #151817, #0b0d0c);
+}
+.canvas-video-sleep span { font-size: 28px; color: #d6b878; }
+.canvas-video-sleep small { font-size: 12px; opacity: .75; }
 .node.image:active img,
 .node.image:active video,
 .node.video:active img,
@@ -2703,14 +2725,22 @@ button,
 .media-lib-act:hover { border-color: #538080; background: #2a4848; color: #e2fffa; }
 .media-lib-act.danger:hover { border-color: #c66060; background: #5a2f31; color: #ffaaaa; }
 
-.media-lib-preview-overlay { position: absolute; z-index: 30; inset: 0; display: grid; place-content: center; background: #0a1314ee; }
-.media-lib-preview-box { position: relative; max-width: 88vw; max-height: 88vh; border: 1px solid #609e95; border-radius: 9px; background: #162123; box-shadow: 0 24px 60px #000c; overflow: auto; }
-.media-lib-preview-box img, .media-lib-preview-box video { display: block; max-width: 84vw; max-height: 80vh; width:auto; height:auto; object-fit:contain; }
-.media-lib-preview-box.zoomed img { max-width:none; max-height:none; width:auto; height:auto; min-width:84vw; min-height:80vh; object-fit:contain; cursor:zoom-out; }
+.media-lib-preview-overlay { position: absolute; z-index: 30; inset: 0; display: grid; place-items: center; padding: 34px 48px; box-sizing: border-box; background: #0a1314b8; backdrop-filter: blur(2px); }
+.media-lib-preview-box { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(860px, 78%); height: min(620px, 82%); min-width: 0; min-height: 0; border: 1px solid #609e95; border-radius: 9px; background: #162123; box-shadow: 0 24px 60px #000c; overflow: hidden; }
+.media-lib-preview-box img, .media-lib-preview-box video { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; object-fit: contain; background: #080c0c; cursor: zoom-in; }
+.media-lib-preview-overlay.fullscreen { position: fixed; z-index: 1400; padding: 0; background: #050505fa; backdrop-filter: none; }
+.media-lib-preview-overlay.fullscreen .media-lib-preview-box.zoomed { width: 100vw; height: 100vh; max-width: none; max-height: none; border: 0; border-radius: 0; box-shadow: none; }
+.media-lib-preview-box.zoomed img { width: 100%; height: 100%; object-fit: contain; cursor: zoom-out; }
 .media-lib-preview-title { padding:8px 40px 7px 11px; color:#d8eeea; font-size:12px; border-bottom:1px solid #385452; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .media-lib-preview-tip { display:block; padding:6px 10px; color:#91aaa7; text-align:center; font-size:10px; }
-.media-lib-preview-close { position: absolute; z-index: 5; top: 8px; right: 8px; width: 26px; height: 26px; border-radius: 50%; border: 1px solid #6db0a6; background: #102424cc; color: #e2fffa; font-size: 15px; display: grid; place-content: center; cursor: pointer; }
+.media-lib-preview-close { position: absolute; z-index: 5; top: 6px; right: 8px; min-width: 50px; height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid #6db0a6; background: #102424ee; color: #e2fffa; font-size: 11px; display: grid; place-content: center; cursor: pointer; }
 .media-lib-preview-close:hover { background: #2d5955; border-color: #8ee6d8; }
+@media (max-width: 760px), (max-height: 620px) {
+  .media-lib-preview-overlay { padding: 18px; }
+  .media-lib-preview-box { width: min(760px, 92%); height: min(540px, 92%); }
+  .media-lib-preview-overlay.fullscreen { padding: 0; }
+  .media-lib-preview-overlay.fullscreen .media-lib-preview-box.zoomed { width: 100vw; height: 100vh; }
+}
 
 .media-lib-confirm-overlay { position: absolute; z-index: 20; inset: 0; display: grid; place-content: center; background: #0a131499; }
 .media-lib-confirm-box { width: 300px; padding: 18px; border: 1px solid #607676; border-radius: 9px; background: #1e2b2d; box-shadow: 0 18px 44px #000c; display: grid; gap: 10px; }
@@ -6037,9 +6067,9 @@ button, input, select, textarea {
   font: 11px/1.4 "Microsoft YaHei UI", sans-serif;
 }
 
-/* The API dialog is intentionally a short happy-path form. Advanced protocol
-   settings still exist below, but no longer dominate the first screen. */
-.online-provider-dialog .provider-capability-tabs { display: none; }
+/* The API dialog starts with an explicit node-type switch, so it is always
+   clear whether the saved platform/model belongs to text, image, or video. */
+.online-provider-dialog .provider-capability-tabs { display: grid; }
 .online-provider-dialog .provider-capability-picker,
 .online-provider-dialog .manual-model-row { margin-top: 4px; }
 .online-provider-dialog .provider-model-discovery { align-items: center; }
@@ -6050,17 +6080,23 @@ button, input, select, textarea {
   z-index: 90;
   right: 28px;
   bottom: 5px;
-  max-width: min(330px, calc(100vw - 44px));
+  max-width: min(680px, calc(100vw - 44px));
   color: #a99b87;
   font: 10px "Noto Serif SC", "Songti SC", serif;
   letter-spacing: .045em;
   pointer-events: none;
 }
-.canvas-live-status span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-live-status span {
+  display: block;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  line-height: 1.55;
+}
 @media (max-width: 700px) {
   .canvas-live-status { right: 14px; bottom: 5px; max-width: calc(100vw - 28px); }
 }
-.provider-capability-tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.provider-capability-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .provider-capability-tabs button { min-height: 34px; border: 1px solid #4a3c2b; border-radius: 8px; background: #15120e; color: #b9aa96; }
 .provider-capability-tabs button.active { border-color: #9b7b50; background: #2a2118; color: #f0d8b6; }
 .provider-capability-picker { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 10px 12px; border: 1px solid #3d3428; border-radius: 8px; background: #0e0d0b; color: #b9aa96; }
@@ -6253,4 +6289,748 @@ button, input, select, textarea {
   height: 100% !important;
   object-fit: contain !important;
   object-position: center;
+}
+
+/* Keep connection settings available without turning them into a full-screen
+   interruption: this is a compact, bottom-right canvas utility. */
+.app .online-provider-backdrop {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-start;
+  padding: 0 0 12px 12px;
+  background: transparent;
+  backdrop-filter: none;
+  pointer-events: auto;
+}
+/* The left-bottom position is relative to the canvas, never on top of the
+   open workbench rail. */
+.app.studio-open .online-provider-backdrop {
+  padding-left: 278px;
+}
+.app .online-provider-dialog {
+  /* Stay inside the left workbench rail even when Windows display scaling is
+     above 100%, so the dock never intrudes into the canvas. */
+  width: min(240px, calc(100vw - 24px));
+  max-height: min(460px, calc(100dvh - 24px));
+  gap: 7px;
+  padding: 12px;
+  border-radius: 10px;
+  overflow-y: auto;
+}
+.app .online-provider-dialog header b { font-size: 17px; }
+.app .online-provider-dialog header span { font-size: 11px; }
+.app .online-provider-dialog .dialog-close { width: 28px; height: 28px; font-size: 18px; }
+.app .online-provider-dialog .online-provider-tabs { gap: 4px; padding: 2px; }
+.app .online-provider-dialog .online-provider-tabs button,
+.app .online-provider-dialog .provider-capability-tabs button { min-height: 30px; font-size: 11px; }
+.app .online-provider-dialog label { gap: 3px; font-size: 11px; }
+.app .online-provider-dialog input,
+.app .online-provider-dialog select { height: 34px; padding-inline: 8px; font-size: 12px; }
+.app .online-provider-dialog footer button { height: 34px; padding-inline: 10px; font-size: 12px; }
+.app .online-provider-dialog header small,
+.app .online-provider-dialog .provider-model-choice-note {
+  display: none;
+}
+.app .online-provider-dialog .provider-model-discovery {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.app .online-provider-dialog .provider-model-discovery small {
+  display: none;
+}
+.app .online-provider-dialog .provider-model-discovery button {
+  min-height: 34px;
+  padding-inline: 10px;
+  white-space: nowrap;
+}
+.app .online-provider-dialog .provider-select-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+}
+.app .online-provider-dialog .provider-select-row button {
+  min-height: 34px;
+  padding-inline: 6px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.app .online-provider-dialog .provider-select-row .provider-delete-button {
+  min-width: 30px;
+  padding-inline: 0;
+  font-size: 16px;
+}
+
+/* Landscape canvas utility: settings are controls, not a tall form. */
+.app .online-provider-dialog {
+  position: relative;
+  width: min(430px, calc(100vw - 36px));
+  max-height: min(270px, calc(100dvh - 28px));
+  padding: 10px 12px 12px;
+}
+.app .online-provider-dialog > header {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  right: 8px;
+  margin: 0;
+}
+.app .online-provider-dialog > header > div { display: none; }
+.app .online-provider-dialog .provider-config-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 7px 8px;
+  align-items: end;
+}
+.app .online-provider-dialog .provider-capability-tabs,
+.app .online-provider-dialog .custom-provider-add,
+.app .online-provider-dialog .provider-test-result { grid-column: 1 / -1; }
+.app .online-provider-dialog .provider-capability-tabs { grid-column: span 3; }
+.app .online-provider-dialog .provider-platform-field { grid-column: span 4; }
+.app .online-provider-dialog .provider-endpoint-field { grid-column: span 5; }
+.app .online-provider-dialog .provider-key-field { grid-column: span 5; }
+.app .online-provider-dialog .provider-model-field { grid-column: span 5; }
+.app .online-provider-dialog .provider-model-discovery { grid-column: span 2; }
+.app .online-provider-dialog .provider-status { grid-column: span 8; }
+.app .online-provider-dialog .provider-config-grid > footer {
+  grid-column: span 4;
+  margin: 0;
+  align-self: end;
+}
+.app .online-provider-dialog .provider-config-grid > footer button { height: 34px; }
+.app .online-provider-dialog .provider-capability-tabs {
+  display: flex;
+  gap: 4px;
+}
+.app .online-provider-dialog .provider-capability-tabs button {
+  min-width: 0;
+  flex: 1;
+  padding-inline: 5px;
+  font-size: 0;
+}
+.app .online-provider-dialog .provider-capability-tabs button::before { font-size: 13px; }
+.app .online-provider-dialog .provider-capability-tabs button:nth-child(1)::before { content: "文"; }
+.app .online-provider-dialog .provider-capability-tabs button:nth-child(2)::before { content: "图"; }
+.app .online-provider-dialog .provider-capability-tabs button:nth-child(3)::before { content: "视频"; font-size: 11px; }
+.app .online-provider-dialog .provider-model-discovery {
+  justify-content: flex-end;
+  gap: 5px;
+}
+.app .online-provider-dialog .provider-model-discovery button {
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
+  font-size: 17px;
+}
+.app .online-provider-dialog .provider-status {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: #a99880;
+  font-size: 11px;
+  line-height: 34px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.app .online-provider-dialog .provider-status i {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #8a7d68;
+}
+.app .online-provider-dialog .provider-status.success i { background: #67c9a3; }
+.app .online-provider-dialog .provider-status.error i { background: #d26c5c; }
+@media (max-width: 640px) {
+  .app .online-provider-dialog {
+    width: calc(100vw - 24px);
+    max-height: calc(100dvh - 24px);
+  }
+  .app .online-provider-dialog .provider-config-grid {
+    grid-template-columns: 1fr;
+  }
+  .app .online-provider-dialog .provider-platform-field,
+  .app .online-provider-dialog .provider-endpoint-field,
+  .app .online-provider-dialog .provider-key-field,
+  .app .online-provider-dialog .provider-model-field,
+  .app .online-provider-dialog .provider-model-discovery,
+  .app .online-provider-dialog .provider-status,
+  .app .online-provider-dialog .provider-config-grid > footer {
+    grid-column: 1;
+  }
+}
+.app .online-provider-dialog .provider-select-row .provider-delete-button {
+  padding-inline: 9px;
+  border-color: #75524a;
+  background: #211512;
+  color: #dfaaa0;
+}
+.app .online-provider-dialog .provider-saved-records {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: -3px;
+}
+.app .online-provider-dialog .provider-saved-records small {
+  color: #9d8f7c;
+  font-size: 11px;
+}
+.app .online-provider-dialog .provider-saved-records button {
+  min-height: 27px;
+  border: 1px solid #514637;
+  border-radius: 6px;
+  padding: 0 8px;
+  background: #17130f;
+  color: #cdbb9e;
+  font: 11px "Microsoft YaHei UI", sans-serif;
+}
+.app .online-provider-dialog .provider-saved-records button.active {
+  border-color: #b18d59;
+  background: #2a2118;
+  color: #f1d4a0;
+}
+@media (max-width: 640px) {
+  .app .online-provider-backdrop {
+    padding: 12px;
+  }
+  .app.studio-open .online-provider-backdrop {
+    padding-left: 12px;
+  }
+  .app .online-provider-dialog {
+    width: calc(100vw - 24px);
+    max-height: calc(100dvh - 24px);
+  }
+}
+
+/* Connection settings are a short, wide canvas utility.  Give the controls
+   enough breathing room instead of forcing API and MCP into a narrow column. */
+.app .online-provider-dialog.api-config-dialog,
+.app .online-provider-dialog.mcp-config-dialog {
+  width: min(640px, calc(100vw - 16px));
+}
+.app .online-provider-dialog.api-config-dialog {
+  max-height: min(292px, calc(100dvh - 28px));
+}
+.app .online-provider-dialog.api-config-dialog .provider-config-grid {
+  grid-template-columns: repeat(14, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+.app .online-provider-dialog.api-config-dialog .provider-capability-tabs {
+  grid-column: span 2;
+  grid-row: span 2;
+  flex-direction: column;
+  align-self: stretch;
+  padding-right: 4px;
+  gap: 4px;
+}
+.app .online-provider-dialog.api-config-dialog .provider-capability-tabs button {
+  flex: 1 1 0;
+  min-height: 0;
+  padding: 0;
+}
+.app .online-provider-dialog.api-config-dialog .provider-capability-tabs button::before {
+  font-size: 11px;
+}
+.app .online-provider-dialog.api-config-dialog .provider-capability-tabs button:nth-child(3)::before {
+  font-size: 9px;
+}
+.app .online-provider-dialog.api-config-dialog .provider-platform-field {
+  grid-column: span 6;
+}
+.app .online-provider-dialog.api-config-dialog .provider-endpoint-field {
+  grid-column: span 6;
+}
+.app .online-provider-dialog.api-config-dialog .provider-key-field {
+  grid-column: span 6;
+}
+.app .online-provider-dialog.api-config-dialog .provider-model-field {
+  grid-column: span 6;
+}
+.app .online-provider-dialog.api-config-dialog .provider-model-discovery {
+  grid-column: span 2;
+}
+.app .online-provider-dialog.api-config-dialog .provider-status {
+  grid-column: span 7;
+}
+.app .online-provider-dialog.api-config-dialog .provider-config-grid > footer {
+  grid-column: 10 / -1;
+  grid-row: 3;
+  justify-self: end;
+  align-self: center;
+}
+.app .online-provider-dialog.api-config-dialog .provider-config-grid > footer button {
+  white-space: nowrap;
+}
+.app .online-provider-dialog.api-config-dialog .provider-platform-field select {
+  min-width: 0;
+}
+.app .online-provider-dialog.api-config-dialog .provider-select-row {
+  gap: 7px;
+}
+
+/* MCP uses the same landscape footprint: services on the left, the current
+   service's essentials in a balanced two-column editor on the right. */
+.app .online-provider-dialog.mcp-config-dialog {
+  max-height: min(318px, calc(100dvh - 28px));
+}
+.app .mcp-config-dialog .mcp-config-layout {
+  grid-template-columns: 142px minmax(0, 1fr);
+  min-height: 250px;
+  height: 250px;
+  border-radius: 8px;
+}
+.app .mcp-config-dialog .mcp-config-layout > aside {
+  gap: 6px;
+  padding: 8px;
+  overflow-y: auto;
+}
+.app .mcp-config-dialog .mcp-config-layout > aside button {
+  min-height: 38px;
+  padding: 7px 8px;
+  font-size: 11px;
+}
+.app .mcp-config-dialog .mcp-config-layout > aside .mcp-add {
+  text-align: center;
+}
+.app .mcp-config-dialog .mcp-config-layout > main {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
+  gap: 8px 10px;
+  padding: 10px;
+  overflow: auto;
+}
+.app .mcp-config-dialog .mcp-config-layout > main > label {
+  min-width: 0;
+}
+.app .mcp-config-dialog .mcp-config-layout > main > .mcp-enabled {
+  align-self: end;
+  min-height: 34px;
+  padding-bottom: 2px;
+  font-size: 11px;
+}
+.app .mcp-config-dialog .mcp-tools,
+.app .mcp-config-dialog .mcp-config-layout main > footer,
+.app .mcp-config-dialog .mcp-empty {
+  grid-column: 1 / -1;
+}
+.app .mcp-config-dialog .mcp-tools {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 10px;
+  max-height: 70px;
+  min-height: 48px;
+  padding: 7px 9px;
+}
+.app .mcp-config-dialog .mcp-tools header {
+  grid-column: 1 / -1;
+  font-size: 11px;
+}
+.app .mcp-config-dialog .mcp-tools > div {
+  min-width: 0;
+  padding: 3px 0;
+}
+.app .mcp-config-dialog .mcp-tools > div small {
+  display: none;
+}
+.app .mcp-config-dialog .mcp-tools p {
+  grid-column: 1 / -1;
+  margin: 0;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.app .mcp-config-dialog .mcp-config-layout main > footer {
+  align-items: center;
+  margin: 0;
+}
+.app .mcp-config-dialog .mcp-config-layout main > footer button {
+  height: 32px;
+  font-size: 11px;
+}
+.app .mcp-config-dialog .mcp-empty {
+  min-height: 0;
+  height: 100%;
+}
+@media (max-width: 640px) {
+  .app .online-provider-dialog.api-config-dialog,
+  .app .online-provider-dialog.mcp-config-dialog {
+    width: calc(100vw - 24px);
+  }
+  .app .mcp-config-dialog .mcp-config-layout {
+    grid-template-columns: 1fr;
+    height: auto;
+    max-height: none;
+  }
+  .app .mcp-config-dialog .mcp-config-layout > aside {
+    max-height: 110px;
+    border-right: 0;
+    border-bottom: 1px solid #403426;
+  }
+}
+
+/* Video parameters are choices, not muted labels: the active choice needs to
+   remain obvious when the popover is opened above a busy canvas. */
+.app .online-video-params-popover .online-param-options button.active {
+  border-color: #d4a65d;
+  background: #5a4321;
+  box-shadow: inset 0 0 0 1px #f1cf91, 0 0 0 1px #d4a65d55;
+  color: #fff1d7;
+  font-weight: 700;
+}
+.app .online-video-params-popover .online-param-options button.active::before {
+  content: "✓ ";
+  color: #f3c979;
+}
+
+.ai-source-settings { position: relative; }
+.ai-source-settings-popover {
+  position: absolute;
+  z-index: 40;
+  right: 0;
+  bottom: calc(100% + 8px);
+  display: grid;
+  width: 210px;
+  gap: 7px;
+  border: 1px solid #65543d;
+  border-radius: 10px;
+  padding: 12px;
+  background: #1a1712;
+  box-shadow: 0 16px 34px #000b;
+  color: #e9dac1;
+}
+.ai-source-settings-popover b { font-size: 14px; }
+.ai-source-settings-popover small { color: #a99b87; font-size: 11px; line-height: 1.45; }
+.ai-source-settings-popover > button {
+  min-height: 34px;
+  border: 1px solid #5e4c35;
+  border-radius: 7px;
+  background: #211b13;
+  color: #e5d5bd;
+  font: 12px "Microsoft YaHei UI", sans-serif;
+}
+.ai-source-settings-popover > button.active { border-color: #d1a45f; background: #4e3920; color: #fff0d4; }
+
+/* Media library final layout contract. Large organized libraries used to let
+   an implicit grid row collapse cards into thin horizontal strips. Keep every
+   material readable: a real preview, its name/group, and its actions. */
+.app .media-lib-grid {
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-auto-rows: max-content;
+  gap: 14px;
+  padding: 16px;
+}
+.app .media-lib-card {
+  display: grid !important;
+  grid-template-rows: 148px auto 38px;
+  min-width: 0;
+  min-height: 238px;
+  height: auto !important;
+  align-self: start;
+}
+.app .media-lib-card-thumb,
+.app .media-lib-card-thumb.portrait {
+  width: 100%;
+  min-height: 148px;
+  height: 148px !important;
+  aspect-ratio: auto !important;
+}
+.app .media-lib-card-thumb img,
+.app .media-lib-card-thumb video {
+  width: 100%;
+  height: 100%;
+}
+.app .media-lib-card-info {
+  display: grid !important;
+  min-height: 50px;
+  align-content: center;
+  box-sizing: border-box;
+}
+.app .media-lib-card-actions {
+  display: flex !important;
+  min-height: 38px;
+  align-items: center;
+  box-sizing: border-box;
+}
+.app .media-lib-type-heading {
+  min-height: 38px;
+  box-sizing: border-box;
+}
+@media (max-width: 900px) {
+  .app .media-lib-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+  .app .media-lib-card { grid-template-rows: 126px auto 36px; min-height: 212px; }
+  .app .media-lib-card-thumb,
+  .app .media-lib-card-thumb.portrait { min-height: 126px; height: 126px !important; }
+}
+
+/* The creation workspace is a fixed one-screen launcher, not a scrollable
+   document. Start immediately below the title bar and keep every action in
+   view; wheel input over it must not scroll the panel or zoom the canvas. */
+.app .studio-sidebar {
+  inset: 62px auto 0 0;
+  box-sizing: border-box;
+  height: calc(100% - 62px);
+  padding: 10px 13px 9px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden !important;
+  overscroll-behavior: none;
+}
+.app .sidebar-title {
+  flex: 0 0 auto;
+  gap: 8px;
+  padding: 2px 4px 9px;
+}
+.app .sidebar-title small { margin-top: 2px; font-size: 9px; }
+.app .brand-mark { width: 27px; height: 27px; }
+.app .director-mode-button { padding: 5px 7px; font-size: 9px; }
+.app .project-overview {
+  flex: 0 0 auto;
+  padding: 9px 10px;
+  border-radius: 8px;
+}
+.app .project-overview strong { margin: 3px 0 7px; font-size: 13px; }
+.app .overview-counts { gap: 5px; }
+.app .overview-counts i { padding: 4px 2px; font-size: 13px; }
+.app .overview-counts small { margin-top: 1px; font-size: 8px; }
+.app .flow-library {
+  flex: 0 0 auto;
+  padding: 2px 0 0;
+}
+.app .flow-library p { margin: 9px 7px 4px; font-size: 9px; }
+.app .flow-library .side-action {
+  min-height: 0;
+  height: 48px;
+  gap: 8px;
+  margin: 2px 0;
+  padding: 6px 8px;
+  box-sizing: border-box;
+}
+.app .flow-library .side-action b { width: 26px; height: 26px; font-size: 14px; }
+.app .flow-library .side-action > span { gap: 1px; font-size: 11px; }
+.app .flow-library .side-action > span small { margin: 0; font-size: 8.5px; line-height: 1.2; }
+.app .flow-guide {
+  flex: 0 0 auto;
+  margin-top: 7px;
+  padding: 7px 6px 0;
+}
+.app .flow-guide > span { font-size: 8px; }
+.app .flow-guide ol {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  margin: 5px 0 0;
+  padding: 0;
+  list-style-position: inside;
+  font-size: 8px;
+  line-height: 1.3;
+}
+@media (max-height: 900px) {
+  .app .studio-sidebar { padding-top: 7px; }
+  .app .sidebar-title { padding-bottom: 6px; }
+  .app .project-overview { padding: 6px 8px; }
+  .app .project-overview strong { margin: 2px 0 5px; }
+  .app .flow-library p { margin: 5px 7px 2px; }
+  .app .flow-library .side-action { height: 39px; margin: 1px 0; padding: 4px 7px; }
+  .app .flow-library .side-action b { width: 23px; height: 23px; font-size: 12px; }
+  .app .flow-library .side-action > span { font-size: 10px; }
+  .app .flow-library .side-action > span small { font-size: 7.5px; }
+  .app .flow-guide { margin-top: 4px; padding-top: 4px; }
+}
+
+.app .autosave-setting {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px 10px;
+  padding: 10px;
+  border: 1px solid var(--ui-line, #34383b);
+  border-radius: 7px;
+  background: #ffffff03;
+}
+.app .autosave-setting > label { font-size: 12px; }
+.app .autosave-minute-input {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.app .autosave-minute-input input {
+  width: 92px;
+  min-width: 0;
+  text-align: right;
+}
+.app .autosave-minute-input span {
+  color: var(--ui-muted, #91999d);
+  font-size: 11px;
+}
+.app .autosave-setting small {
+  grid-column: 1 / -1;
+  font-size: 10px;
+}
+
+/* Keep the launcher flush with the title bar.  Its entries stay in one
+   compact rhythm instead of spreading apart on tall displays. */
+.app .studio-sidebar { padding-top: 0; }
+.app .sidebar-title { padding-top: 9px; }
+
+.app .canvas-drop-hint {
+  position: absolute;
+  z-index: 120;
+  inset: 16px;
+  display: grid;
+  place-content: center;
+  gap: 7px;
+  border: 2px dashed #c9a66d;
+  border-radius: 14px;
+  background: #17120ddf;
+  box-shadow: inset 0 0 60px #0008;
+  color: #f0d5a8;
+  pointer-events: none;
+  text-align: center;
+}
+.app .canvas-drop-hint b { font-size: 18px; }
+.app .canvas-drop-hint span { color: #ad9b81; font-size: 11px; }
+
+/* Responsive creation rail -------------------------------------------------
+   Keep the cards in one balanced column at every window height. The earlier
+   fixed 39/48px rows left a large dead area on tall displays and crowded the
+   same controls on short displays. */
+.app {
+  --studio-rail-width: clamp(248px, 20vw, 340px);
+}
+.app .studio-sidebar {
+  width: min(var(--studio-rail-width), calc(100vw - 44px));
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: clamp(5px, .7dvh, 11px);
+}
+.app .studio-toggle.open {
+  left: min(var(--studio-rail-width), calc(100vw - 44px));
+}
+.app.studio-open .online-provider-backdrop {
+  padding-left: calc(min(var(--studio-rail-width), calc(100vw - 44px)) + 16px);
+}
+.app .sidebar-title {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  padding: clamp(7px, 1dvh, 13px) 7px clamp(6px, .8dvh, 11px);
+}
+.app .director-mode-button {
+  grid-column: 1 / -1;
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: clamp(5px, .7dvh, 9px) 0 0;
+  padding: 8px 10px;
+  text-align: left;
+}
+.app .director-mode-button > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.app .director-mode-button strong {
+  color: inherit;
+  font-size: clamp(13px, .95vw, 15px);
+  line-height: 1.2;
+}
+.app .director-mode-button small {
+  overflow: hidden;
+  color: #aa9982;
+  font-size: clamp(9px, .7vw, 10.5px);
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app .director-mode-button em {
+  flex: 0 0 auto;
+  border: 1px solid #735f43;
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: #d9b982;
+  font-size: 9px;
+  font-style: normal;
+  white-space: nowrap;
+}
+.app .project-overview {
+  padding: clamp(7px, 1dvh, 13px) 10px;
+}
+.app .project-overview strong {
+  margin-block: clamp(3px, .55dvh, 8px);
+}
+.app .overview-counts i {
+  padding-block: clamp(4px, .75dvh, 10px);
+}
+.app .flow-library {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-auto-rows: max-content;
+  align-content: start;
+  gap: clamp(3px, .55dvh, 7px);
+  min-height: 0;
+  padding: 0;
+}
+.app .flow-library p {
+  margin: 0 7px;
+  align-self: end;
+  font-size: clamp(10px, .78vw, 12px);
+  line-height: 1.35;
+}
+.app .flow-library .side-action {
+  width: 100%;
+  min-height: clamp(44px, 5.3dvh, 66px);
+  height: auto;
+  margin: 0;
+  padding: clamp(4px, .65dvh, 8px) clamp(7px, .75vw, 11px);
+}
+.app .flow-library .side-action b {
+  width: clamp(23px, 2.35vw, 31px);
+  height: clamp(23px, 2.35vw, 31px);
+}
+.app .flow-library .side-action > span {
+  font-size: clamp(13px, 1vw, 15px);
+  line-height: 1.25;
+}
+.app .flow-library .side-action > span small {
+  font-size: clamp(9.5px, .78vw, 11px);
+  line-height: 1.3;
+}
+.app .online-api-picker {
+  display: grid;
+  gap: clamp(2px, .42dvh, 6px);
+}
+.app .flow-guide {
+  margin: 0;
+  padding: clamp(5px, .65dvh, 9px) 6px 0;
+}
+.app .flow-guide > span {
+  font-size: clamp(10.5px, .8vw, 12px);
+  line-height: 1.35;
+}
+.app .flow-guide ol {
+  column-gap: 10px;
+  font-size: clamp(9.5px, .72vw, 11px);
+  line-height: 1.45;
+}
+@media (max-height: 760px) {
+  .app .studio-sidebar { gap: 3px; }
+  .app .sidebar-title { padding-block: 5px; }
+  .app .project-overview { padding-block: 5px; }
+  .app .project-overview strong { margin-block: 2px 4px; }
+  .app .overview-counts i { padding-block: 3px; }
+  .app .flow-library .side-action { min-height: 40px; }
+  .app .flow-guide { padding-top: 3px; }
+  .app .flow-guide ol { margin-top: 3px; line-height: 1.15; }
+}
+@media (max-width: 640px) {
+  .app { --studio-rail-width: min(340px, calc(100vw - 36px)); }
+  .app.studio-open .online-provider-backdrop { padding-left: 12px; }
 }

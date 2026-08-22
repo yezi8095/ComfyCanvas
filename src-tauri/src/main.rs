@@ -501,8 +501,7 @@ fn transcode_webm(
     Ok(())
 }
 
-#[tauri::command]
-fn find_comfyui() -> ComfyStatus {
+fn find_comfyui_blocking() -> ComfyStatus {
     for port in [8188, 8189] {
         if comfy_reachable(port) {
             return ComfyStatus {
@@ -525,6 +524,21 @@ fn find_comfyui() -> ComfyStatus {
         endpoint: "".into(),
         detail: "没有找到正在运行的 ComfyUI；请先用启动器启动 ComfyUI".into(),
     }
+}
+
+#[tauri::command]
+async fn find_comfyui() -> ComfyStatus {
+    // TCP connect/read timeouts are intentionally blocking operations. Running
+    // them in a synchronous Tauri command stalls the desktop IPC/WebView event
+    // loop, which presents as a periodic pause in typing, menus and canvas
+    // movement whenever ComfyUI is offline or slow to answer.
+    tauri::async_runtime::spawn_blocking(find_comfyui_blocking)
+        .await
+        .unwrap_or_else(|_| ComfyStatus {
+            connected: false,
+            endpoint: String::new(),
+            detail: "ComfyUI 后台检测任务异常结束，请手动重试".into(),
+        })
 }
 
 #[tauri::command]
@@ -1237,12 +1251,10 @@ fn openai_image_options(
     } else if is_dall_e_2 {
         (&[], None)
     } else {
-        // Preserve the old OpenAI-compatible request when the caller has not
-        // yet supplied a provider-specific capability profile.
-        (
-            &["auto", "low", "medium", "high", "standard", "hd"],
-            Some("low"),
-        )
+        // A generic OpenAI-compatible image endpoint does not necessarily
+        // accept OpenAI's quality vocabulary. Do not invent `quality=low`;
+        // provider-specific adapters can opt into a quality contract above.
+        (&[], None)
     };
     let quality = requested_quality
         .as_deref()
@@ -1410,6 +1422,93 @@ async fn generate_openai_image_edit(
 }
 
 #[tauri::command]
+async fn generate_dashscope_image(
+    endpoint: String,
+    api_key: String,
+    prompt: String,
+    model: String,
+    ratio: String,
+    resolution: String,
+    amount: u8,
+    image_data: Option<String>,
+) -> Result<Vec<String>, String> {
+    validate_provider_request("阿里百炼·万相", &endpoint, &api_key, &prompt, &model)?;
+    let endpoint = validated_http_endpoint("阿里百炼·万相", &endpoint)?.trim_end_matches('/');
+    // Qwen-Image uses DashScope's native multimodal route, not the
+    // OpenAI-compatible /images endpoint.
+    let base = endpoint.replace("/compatible-mode/v1", "/api/v1");
+    let base = if base.ends_with("/api/v1") { base } else { format!("{base}/api/v1") };
+    // The native Qwen-Image API requires an explicit `size`.  Without it the
+    // service can reject otherwise valid model requests instead of using the
+    // dimensions selected in the node.
+    let explicit_size = resolution.trim().replace('x', "*").replace('X', "*");
+    let long_edge = match resolution.trim() {
+        "4096" => 2048,
+        "2048" => 2048,
+        "1792" => 1536,
+        "1536" => 1536,
+        "512" => 512,
+        "256" => 256,
+        _ => 1024,
+    };
+    let (width, height) = match ratio.trim() {
+        "16:9" => (long_edge, (long_edge * 9 / 16 / 16) * 16),
+        "9:16" => ((long_edge * 9 / 16 / 16) * 16, long_edge),
+        "4:3" => (long_edge, (long_edge * 3 / 4 / 16) * 16),
+        "3:4" => ((long_edge * 3 / 4 / 16) * 16, long_edge),
+        "3:2" => (long_edge, (long_edge * 2 / 3 / 16) * 16),
+        "2:3" => ((long_edge * 2 / 3 / 16) * 16, long_edge),
+        "21:9" => (long_edge, (long_edge * 9 / 21 / 16) * 16),
+        _ => (long_edge, long_edge),
+    };
+    let size = if explicit_size.split('*').count() == 2
+        && explicit_size.split('*').all(|part| part.parse::<u32>().is_ok())
+    {
+        explicit_size
+    } else {
+        format!("{width}*{height}")
+    };
+    let mut content = Vec::new();
+    if let Some(image) = image_data.filter(|value| !value.trim().is_empty()) {
+        content.push(serde_json::json!({ "image": image }));
+    }
+    content.push(serde_json::json!({ "text": prompt }));
+    let response = reqwest::Client::new()
+        .post(format!("{base}/services/aigc/multimodal-generation/generation"))
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({
+            "model": model,
+            "input": { "messages": [{ "role": "user", "content": content }] },
+            "parameters": { "prompt_extend": true, "size": size, "n": amount.clamp(1, 6) }
+        }))
+        .send()
+        .await
+        .map_err(|error| provider_network_error("阿里百炼·万相", "生成图片", &error))?;
+    let response = provider_json_response("阿里百炼·万相", "生成图片", response).await?;
+    let image_urls: Vec<&str> = response.pointer("/output/choices")
+        .and_then(serde_json::Value::as_array)
+        .map(|choices| choices.iter().filter_map(|choice| choice.pointer("/message/content")
+          .and_then(serde_json::Value::as_array)
+          .and_then(|items| items.iter().find_map(|item| item.get("image").or_else(|| item.get("url")).and_then(serde_json::Value::as_str))))
+          .collect())
+        .unwrap_or_default();
+    if image_urls.is_empty() {
+        return Err("万相图片接口没有返回图片地址".to_string());
+    }
+    let mut images = Vec::with_capacity(image_urls.len());
+    for image_url in image_urls {
+        let url = reqwest::Url::parse(image_url)
+            .map_err(|error| format!("万相返回的图片地址无效：{error}"))?;
+        let response = reqwest::get(url)
+            .await
+            .map_err(|error| provider_network_error("阿里百炼·万相", "下载生成图片", &error))?;
+        let bytes = provider_bytes_response("阿里百炼·万相", "下载生成图片", response).await?;
+        images.push(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)));
+    }
+    Ok(images)
+}
+
+#[tauri::command]
 async fn generate_google_image(
     endpoint: String,
     api_key: String,
@@ -1562,13 +1661,26 @@ fn validate_wan_video_contract<'a>(
     }
     let quality = validate_video_quality(quality)?;
     let ratio = validate_video_ratio(ratio)?;
-    if !matches!(ratio, "16:9" | "9:16") && quality != "720P" {
+    let is_wan3 = model.trim().to_ascii_lowercase().contains("wan3");
+    if is_wan3 && !matches!(ratio, "16:9" | "9:16" | "1:1" | "4:3" | "3:4") {
         return Err(format!(
-            "万相当前适配在 {ratio} 比例使用平台固定画幅，只提供 720P 档位；480P/1080P 不会被静默忽略"
+            "万相 3 当前接口不支持 {ratio} 比例；请使用 16:9、9:16、1:1、4:3 或 3:4"
         ));
     }
-    if !(5..=10).contains(&duration) {
-        return Err("万相视频时长必须在 5 到 10 秒之间；当前请求不会自动改写时长".into());
+    if !is_wan3 && quality == "480P" {
+        return Err("万相 2.6 当前适配只提供 720P 和 1080P；480P 仅对万相 3 模型开放".into());
+    }
+    if !matches!(ratio, "16:9" | "9:16" | "1:1") && quality == "480P" {
+        return Err(format!(
+            "万相在 {ratio} 比例不提供 480P；请使用 720P 或 1080P"
+        ));
+    }
+    let (minimum_duration, maximum_duration) = if is_wan3 { (2, 30) } else { (2, 15) };
+    if !(minimum_duration..=maximum_duration).contains(&duration) {
+        return Err(format!(
+            "{}视频时长必须在 {minimum_duration} 到 {maximum_duration} 秒之间；当前请求不会自动改写时长",
+            if is_wan3 { "万相 3" } else { "万相 2.6" }
+        ));
     }
     if mode == "firstLast" {
         if duration != 5 {
@@ -1633,14 +1745,19 @@ async fn generate_alibaba_wan_video_request(
     } else {
         format!("{endpoint}/api/v1")
     };
+    // Exact size is part of the DashScope contract. Keep it aligned with the
+    // visible ratio + quality picker rather than relying on a provider default.
     let size = match (ratio, quality) {
         ("9:16", "480P") => "480*832",
+        ("1:1", "480P") => "624*624",
         ("9:16", "1080P") => "1080*1920",
+        ("1:1", "1080P") => "1440*1440",
+        ("4:3", "1080P") => "1632*1248",
+        ("3:4", "1080P") => "1248*1632",
         ("9:16", _) => "720*1280",
         ("1:1", _) => "960*960",
-        ("4:3", _) => "960*720",
-        ("3:4", _) => "720*960",
-        ("21:9", _) => "1472*624",
+        ("4:3", _) => "1088*832",
+        ("3:4", _) => "832*1088",
         (_, "480P") => "832*480",
         (_, "1080P") => "1920*1080",
         _ => "1280*720",
@@ -1671,6 +1788,7 @@ async fn generate_alibaba_wan_video_request(
                   "model": model,
                   "input": { "prompt": prompt, "img_url": img_url },
                   "parameters": {
+                    "size": size,
                     "resolution": quality,
                     "duration": duration,
                     "audio": audio,
@@ -1692,6 +1810,7 @@ async fn generate_alibaba_wan_video_request(
                     "last_frame_url": last_frame_url
                   },
                   "parameters": {
+                    "size": size,
                     "resolution": quality,
                     "prompt_extend": true
                   }
@@ -2729,6 +2848,32 @@ fn workspace_asset_root<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<
         .map_err(|error| format!("无法定位应用素材目录：{error}"))
 }
 
+#[tauri::command]
+fn get_workspace_asset_root(app: tauri::AppHandle) -> Result<String, String> {
+    let root = workspace_asset_root(&app)?;
+    fs::create_dir_all(&root).map_err(|error| format!("无法创建应用素材目录：{error}"))?;
+    Ok(root.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn open_workspace_asset_root(app: tauri::AppHandle) -> Result<(), String> {
+    let root = workspace_asset_root(&app)?;
+    fs::create_dir_all(&root).map_err(|error| format!("无法创建应用素材目录：{error}"))?;
+
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
+
+    command
+        .arg(&root)
+        .spawn()
+        .map_err(|error| format!("无法打开本机素材目录：{error}"))?;
+    Ok(())
+}
+
 fn has_workspace_assets_directory_shape(root: &Path, directory: &Path) -> bool {
     let Ok(relative) = directory.strip_prefix(root) else {
         return false;
@@ -2828,6 +2973,96 @@ fn normalize_workspace_mime_type(value: Option<String>) -> Result<Option<String>
         return Err("素材 MIME 类型无效".into());
     }
     Ok(Some(value.to_string()))
+}
+
+/// Copy a file that the user explicitly dropped onto the Tauri window into
+/// the app-managed project store. Tauri authorizes exact dropped paths in the
+/// asset protocol scope before emitting the renderer event; arbitrary paths
+/// supplied by renderer code therefore remain rejected here.
+#[tauri::command]
+fn import_workspace_asset_from_path(
+    app: tauri::AppHandle,
+    project_id: String,
+    asset_id: String,
+    filename: String,
+    mime_type: Option<String>,
+    source_path: String,
+) -> Result<ManagedWorkspaceAssetRecord, String> {
+    let project_id = validate_workspace_identifier(&project_id, "项目 ID")?;
+    let asset_id = validate_workspace_identifier(&asset_id, "素材 ID")?;
+    let file_name = sanitize_workspace_filename(&filename)?;
+    let mime_type = normalize_workspace_mime_type(mime_type)?;
+    let source = authorized_media_source_path(&app, &source_path)?;
+    let bytes = source
+        .metadata()
+        .map_err(|error| format!("无法读取拖入素材信息：{error}"))?
+        .len();
+    if bytes > WORKSPACE_ASSET_MAX_BYTES {
+        return Err("单个素材不能超过 1 GB".into());
+    }
+
+    let root = workspace_asset_root(&app)?;
+    let assets_dir = root.join("projects").join(&project_id).join("assets");
+    let uploads_dir = root.join("uploads");
+    fs::create_dir_all(&assets_dir).map_err(|error| format!("无法创建项目素材目录：{error}"))?;
+    fs::create_dir_all(&uploads_dir).map_err(|error| format!("无法创建素材临时目录：{error}"))?;
+    authorize_workspace_assets_directory(&app, &assets_dir)?;
+    cleanup_stale_workspace_asset_parts(&root);
+
+    let stored_file_name = format!("{asset_id}--{file_name}");
+    let final_path = managed_workspace_child(&assets_dir, &stored_file_name)?;
+    if final_path.exists() {
+        return Err("该项目已存在相同素材 ID；请重新拖入素材".into());
+    }
+    let upload_id = next_workspace_asset_upload_id();
+    let temp_path = managed_workspace_child(&uploads_dir, &format!("{upload_id}.part"))?;
+    let copied = (|| -> Result<(), String> {
+        let copied = fs::copy(&source, &temp_path)
+            .map_err(|error| format!("无法复制拖入素材：{error}"))?;
+        if copied != bytes {
+            return Err("拖入素材复制不完整，已取消导入".into());
+        }
+        OpenOptions::new()
+            .read(true)
+            .open(&temp_path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("无法同步拖入素材：{error}"))?;
+        fs::rename(&temp_path, &final_path)
+            .map_err(|error| format!("无法提交拖入素材：{error}"))?;
+        Ok(())
+    })();
+    if let Err(error) = copied {
+        remove_workspace_file_best_effort(&temp_path);
+        return Err(error);
+    }
+
+    Ok(ManagedWorkspaceAssetRecord {
+        project_id,
+        asset_id,
+        file_name,
+        mime_type,
+        bytes,
+        local_path: final_path.to_string_lossy().to_string(),
+    })
+}
+
+/// API/Comfy workflow JSON is small text. Only an exact path authorized by a
+/// file drop can be read, and a size cap prevents an accidental huge text
+/// allocation when a wrongly named file is dropped.
+#[tauri::command]
+fn read_dropped_workflow_file(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    let source = authorized_media_source_path(&app, &path)?;
+    if source.extension().and_then(|value| value.to_str()).map(|value| value.eq_ignore_ascii_case("json")) != Some(true) {
+        return Err("拖入的工作流必须是 JSON 文件".into());
+    }
+    let bytes = source
+        .metadata()
+        .map_err(|error| format!("无法读取工作流文件信息：{error}"))?
+        .len();
+    if bytes > 16 * 1024 * 1024 {
+        return Err("工作流 JSON 不能超过 16 MB".into());
+    }
+    fs::read_to_string(source).map_err(|error| format!("无法读取工作流 JSON：{error}"))
 }
 
 fn next_workspace_asset_upload_id() -> String {
@@ -3727,6 +3962,7 @@ fn main() {
             describe_openai_image,
             generate_openai_image_edit,
             generate_openai_image,
+            generate_dashscope_image,
             generate_google_image,
             generate_alibaba_wan_video,
             generate_provider_video,
@@ -3736,6 +3972,10 @@ fn main() {
             cache_comfy_output_media,
             save_project,
             save_media,
+            get_workspace_asset_root,
+            open_workspace_asset_root,
+            import_workspace_asset_from_path,
+            read_dropped_workflow_file,
             begin_workspace_asset,
             append_workspace_asset_chunk,
             commit_workspace_asset,

@@ -257,13 +257,14 @@ export default function MediaLibrary({ open, onClose, nodes, onDeleteNode, onRen
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        if (preview) closePreview();
+        if (previewZoom) setPreviewZoom(false);
+        else if (preview) closePreview();
         else closeLibrary();
       }
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [open, preview]);
+  }, [open, preview, previewZoom]);
 
   const placeOnCanvas = (node: typeof library[number]) => {
     const c = viewportCenter();
@@ -491,12 +492,12 @@ export default function MediaLibrary({ open, onClose, nodes, onDeleteNode, onRen
 
         <>
         {preview && (
-          <div className="media-lib-preview-overlay" onPointerDown={(event) => { if (event.target === event.currentTarget) closePreview(); }}>
+          <div className={"media-lib-preview-overlay" + (previewZoom ? " fullscreen" : "")} onPointerDown={(event) => { if (event.target === event.currentTarget) closePreview(); }}>
             <div className={"media-lib-preview-box" + (previewZoom ? " zoomed" : "")} onPointerDown={(event) => event.stopPropagation()}>
-              <button type="button" className="media-lib-preview-close" onClick={closePreview} aria-label="关闭预览">×</button>
+              <button type="button" className="media-lib-preview-close" onClick={closePreview} aria-label="关闭预览" title="关闭预览（Esc）">关闭</button>
               <div className="media-lib-preview-title">{preview.name}</div>
               {preview.kind === "video" ? (
-                <video src={preview.src} controls autoPlay playsInline />
+                <video src={preview.src} controls autoPlay playsInline onDoubleClick={() => setPreviewZoom((value) => !value)} title="双击全屏或还原" />
               ) : preview.kind === "audio" ? (
                 <div className="media-lib-preview-audio">
                   <div className="media-lib-preview-audio-name">♫ {preview.name}</div>
@@ -510,9 +511,9 @@ export default function MediaLibrary({ open, onClose, nodes, onDeleteNode, onRen
                   />
                 </div>
               ) : (
-                <img src={preview.src} alt={preview.name} onClick={() => setPreviewZoom((value) => !value)} title="点击放大或还原" />
+                <img src={preview.src} alt={preview.name} onDoubleClick={() => setPreviewZoom((value) => !value)} title="双击全屏或还原" />
               )}
-              {preview.kind === "image" && <small className="media-lib-preview-tip">点击画面可放大 / 还原</small>}
+              {(preview.kind === "image" || preview.kind === "video") && <small className="media-lib-preview-tip">双击画面可全屏 / 还原</small>}
             </div>
           </div>
         )}

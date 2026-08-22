@@ -49,6 +49,13 @@ describe("built-in node port catalog", () => {
       ["lastFrame", "image"],
       ["references", "image"],
     ]);
+    expect(getBuiltinNodeDefinition("video")?.inputs.map((port) => [port.id, port.kind])).toEqual([
+      ["prompt", "text"],
+      ["firstFrame", "image"],
+      ["lastFrame", "image"],
+      ["references", "image"],
+      ["source", "video"],
+    ]);
   });
 
   it("declares stable legacy defaults for common authoring connections", () => {

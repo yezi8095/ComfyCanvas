@@ -57,6 +57,17 @@ describe("video provider capabilities", () => {
     });
   });
 
+  it("uses the actual Wan 2.6 and Wan 3 duration contracts", () => {
+    const wan26 = videoCapabilitiesFor("阿里百炼·万相", "wan2.6-t2v");
+    expect(wan26.duration).toEqual({ minimum: 2, maximum: 15, step: 1 });
+    expect(wan26.qualities).toEqual(["720P", "1080P"]);
+    expect(wan26.ratios).not.toContain("21:9");
+
+    const wan3 = videoCapabilitiesFor("阿里百炼·万相", "wan3.0-video");
+    expect(wan3.duration).toEqual({ minimum: 2, maximum: 30, step: 1 });
+    expect(wan3.qualities).toEqual(["480P", "720P", "1080P"]);
+  });
+
   it("rejects malformed first/last-frame input instead of dropping a frame", () => {
     const capabilities = videoCapabilitiesFor("可灵 Kling", "kling-v1-6");
     expect(validateVideoGenerationInput(capabilities, { mode: "firstLast", amount: 1, imageCount: 1 }))

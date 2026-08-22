@@ -5,6 +5,7 @@ import {
   WorkspaceAssetUploadError,
   cacheComfyOutputMedia,
   deleteWorkspaceAsset,
+  importWorkspaceAssetFromPath,
   invokeDesktopWorkspaceAsset,
   listWorkspaceAssets,
   normalizeManagedWorkspaceAsset,
@@ -19,6 +20,45 @@ const namedBlob = (contents: string, name = "hero.png", type = "image/png") => {
 };
 
 describe("workspace asset client", () => {
+  it("imports an authorized native-drop path without reading it into WebView memory", async () => {
+    const calls: Array<{ command: string; arguments_: Record<string, unknown> }> = [];
+    const asset = await importWorkspaceAssetFromPath({
+      projectId: "project-a",
+      assetId: "asset-drop-1",
+      sourcePath: "D:\\素材\\镜头.mp4",
+      fileName: "镜头.mp4",
+      mimeType: "video/mp4",
+    }, {
+      invoke: async (command, arguments_) => {
+        calls.push({ command, arguments_ });
+        return {
+          project_id: "project-a",
+          asset_id: "asset-drop-1",
+          local_path: "D:\\workspace\\asset-drop-1--镜头.mp4",
+          file_name: "镜头.mp4",
+          mime_type: "video/mp4",
+          bytes: 4096,
+        };
+      },
+    });
+
+    expect(calls).toEqual([{
+      command: "import_workspace_asset_from_path",
+      arguments_: {
+        projectId: "project-a",
+        assetId: "asset-drop-1",
+        filename: "镜头.mp4",
+        mimeType: "video/mp4",
+        sourcePath: "D:\\素材\\镜头.mp4",
+      },
+    }]);
+    expect(asset).toMatchObject({
+      localPath: "D:\\workspace\\asset-drop-1--镜头.mp4",
+      fileName: "镜头.mp4",
+      size: 4096,
+    });
+  });
+
   it("streams chunks in order and maps snake_case commit metadata", async () => {
     const calls: Array<{ command: string; arguments_: Record<string, unknown> }> = [];
     const reads: number[] = [];

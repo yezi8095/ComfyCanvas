@@ -27,6 +27,12 @@ export interface VideoGenerationCapabilities {
   modes: readonly VideoGenerationMode[];
   /** The current async task adapters return one video URL per request. */
   amounts: readonly number[];
+  /** Resolution tiers the current model adapter can really submit. */
+  qualities: readonly ("480P" | "720P" | "1080P")[];
+  /** Output aspect ratios accepted by the current adapter contract. */
+  ratios: readonly string[];
+  /** Inclusive duration range that can be sent to this exact model contract. */
+  duration: { minimum: number; maximum: number; step: number };
   /** Maximum images for the provider's multi-reference mode; zero means unavailable. */
   referenceImageLimit: number;
   /** Modes for which the desktop adapter sends a provider-supported audio flag. */
@@ -65,10 +71,16 @@ const singleRequest = (
   referenceImageLimit = 0,
   firstLastContract?: VideoRequestContract,
   audioModes: readonly VideoGenerationMode[] = [],
+  qualities: readonly ("480P" | "720P" | "1080P")[] = ["480P", "720P", "1080P"],
+  duration: VideoGenerationCapabilities["duration"] = { minimum: 5, maximum: 10, step: 1 },
+  ratios: readonly string[] = ["16:9", "9:16", "1:1", "4:3", "3:4"],
 ) => capability(provider, model, {
   protocol,
   modes,
   amounts: [1],
+  qualities,
+  ratios,
+  duration,
   referenceImageLimit,
   audioModes,
   inputLimits: inputLimits(modes, referenceImageLimit),
@@ -85,13 +97,16 @@ export const videoCapabilitiesFor = (provider: string, model: string): VideoGene
   const normalizedModel = model.trim().toLowerCase();
 
   if (normalizedProvider.includes("阿里百炼") || normalizedProvider.includes("万相")) {
+    if (/wan[-_.]?3|wan3/.test(normalizedModel)) {
+      return singleRequest(provider, model, "dashscope", ["text"], 0, undefined, ["text"], ["480P", "720P", "1080P"], { minimum: 2, maximum: 30, step: 1 });
+    }
     if (/kf2v|first[-_.]?last/.test(normalizedModel)) {
-      return singleRequest(provider, model, "dashscope", ["firstLast"], 0, "dashscope-first-last");
+      return singleRequest(provider, model, "dashscope", ["firstLast"], 0, "dashscope-first-last", [], ["1080P"], { minimum: 5, maximum: 5, step: 1 });
     }
     if (/i2v|image[-_.]?to[-_.]?video/.test(normalizedModel)) {
-      return singleRequest(provider, model, "dashscope", ["image"], 0, undefined, ["image"]);
+      return singleRequest(provider, model, "dashscope", ["image"], 0, undefined, ["image"], ["720P", "1080P"], { minimum: 2, maximum: 15, step: 1 });
     }
-    return singleRequest(provider, model, "dashscope", ["text"], 0, undefined, ["text"]);
+    return singleRequest(provider, model, "dashscope", ["text"], 0, undefined, ["text"], ["720P", "1080P"], { minimum: 2, maximum: 15, step: 1 });
   }
 
   if (normalizedProvider.includes("可灵") || normalizedProvider.includes("kling")) {
@@ -141,6 +156,17 @@ export const supportsVideoAudio = (
   capabilities: VideoGenerationCapabilities,
   mode: VideoGenerationMode,
 ) => capabilities.audioModes.includes(mode);
+
+/** Resolution can depend on a provider's ratio or generation contract. */
+export const videoQualitiesFor = (
+  capabilities: VideoGenerationCapabilities,
+  ratio: string,
+  mode: VideoGenerationMode,
+) => {
+  if (capabilities.protocol === "dashscope" && !["16:9", "9:16"].includes(ratio)) return capabilities.qualities.filter((quality) => quality !== "480P");
+  if (capabilities.protocol === "kling" && mode === "firstLast") return ["1080P"] as const;
+  return capabilities.qualities;
+};
 
 export const normalizeVideoGenerationOptions = (
   capabilities: VideoGenerationCapabilities,

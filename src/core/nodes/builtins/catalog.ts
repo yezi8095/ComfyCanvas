@@ -73,6 +73,8 @@ export const BUILTIN_NODE_DEFINITIONS = {
     description: "视频素材或视频生成结果。",
     inputs: [
       { id: "prompt", label: "生成提示词", kind: "text", direction: "input", multiple: true, description: "文本会自动作为文生视频提示词。" },
+      { id: "firstFrame", label: "首帧", kind: "image", direction: "input", description: "图生视频或首尾帧模式的首张图片。" },
+      { id: "lastFrame", label: "尾帧", kind: "image", direction: "input", description: "首尾帧模式的结束图片。" },
       { id: "references", label: "参考图片", kind: "image", direction: "input", multiple: true, description: "图片会自动作为图生视频参考。" },
       { id: "source", label: "视频结果", kind: "video", direction: "input" },
     ],
@@ -208,7 +210,7 @@ const LEGACY_INPUT_PREFERENCES: Partial<
   text: { text: "context", image: "references" },
   storyboard: { text: "script", image: "references" },
   image: { text: "prompt", image: "references" },
-  video: { text: "prompt", image: "references", video: "source" },
+  video: { text: "prompt", image: "firstFrame", video: "source" },
   audio: { audio: "source" },
   aiText: { text: "prompt", image: "references" },
   aiImage: { text: "prompt", image: "references" },

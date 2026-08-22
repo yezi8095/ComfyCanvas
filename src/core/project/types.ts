@@ -10,6 +10,18 @@ export interface StoryboardRow {
   imageId?: string;
 }
 
+export interface ApiGenerationRecord {
+  /** The editor and execution path that produced this output. */
+  kind: "text" | "image" | "video";
+  /** Generator/source node retained on the canvas. */
+  sourceNodeId: string;
+  /** Serializable settings captured immediately before submission. */
+  workflow: unknown;
+  /** Effective prompt after linked text was merged. */
+  prompt: string;
+  createdAt: number;
+}
+
 export interface CanvasNode {
   id: string;
   kind: CanvasNodeKind;
@@ -30,6 +42,8 @@ export interface CanvasNode {
   mediaWidth?: number;
   mediaHeight?: number;
   workflow?: unknown;
+  /** Lets generated outputs be edited or regenerated with their exact inputs. */
+  generationRecord?: ApiGenerationRecord;
   onlineProvider?: string;
   status?: string;
   createdAt?: number;

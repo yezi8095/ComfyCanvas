@@ -2,6 +2,7 @@
   ChangeEvent,
   PointerEvent,
   WheelEvent,
+  startTransition,
   useEffect,
   useMemo,
   useRef,
@@ -34,6 +35,7 @@ import {
   normalizeImageGenerationOptions,
   validateImageGenerationOptions,
   type ImageAspectRatio,
+  type ImageQuality,
   type ImageResolution,
 } from "./core/providers/imageCapabilities";
 import { chooseCompatibleModel } from "./core/providers/modelSelection";
@@ -50,9 +52,11 @@ import {
   videoCapabilitiesFor,
   videoInputLimitForMode,
   videoModeLabel,
+  videoQualitiesFor,
   type VideoGenerationMode,
 } from "./core/providers/videoCapabilities";
 import type {
+  ApiGenerationRecord,
   CanvasNode as NodeItem,
   CanvasProject as Project,
   GenerationSource,
@@ -81,6 +85,13 @@ import {
   type ProjectWorkspaceSnapshot,
 } from "./core/project/repository";
 import {
+  AUTOSAVE_MINUTES_STORE,
+  DEFAULT_AUTOSAVE_MINUTES,
+  MAX_AUTOSAVE_MINUTES,
+  MIN_AUTOSAVE_MINUTES,
+  normalizeAutosaveMinutes,
+} from "./core/project/autosave";
+import {
   planExecution,
   type ExecutionPlanIssue,
 } from "./core/execution/plan";
@@ -91,6 +102,7 @@ import {
 import { createExecutionInputSignature } from "./core/execution/inputSignature";
 import {
   cacheComfyOutputMedia,
+  importWorkspaceAssetFromPath,
   uploadWorkspaceAsset,
   type ManagedWorkspaceAsset,
 } from "./core/assets/workspaceAssetClient";
@@ -154,10 +166,42 @@ type McpToolInfo = { name: string; description?: string };
 type McpServerConfig = { id: string; name: string; endpoint: string; token: string; enabled: boolean; tools: McpToolInfo[]; lastStatus?: string };
 type CloudSettings = { endpoint: string; accessToken: string; accountLabel: string };
 const ONLINE_PROVIDER_STORE = "ym-online-provider-configs-v1";
+const CATEGORY_PROVIDER_STORE = "ym-online-provider-configs-by-node-v1";
 const MCP_SERVER_STORE = "ym-mcp-server-configs-v1";
 const CLOUD_STORE = "ym-cloud-account-v1";
 const PROMPT_LIBRARY_STORE = "yimu-prompt-library";
-const OFFLINE_AUTOSAVE_INTERVAL_MS = 10 * 60 * 1000;
+type CategoryProviderConfigs = Record<ModelCapability, OnlineProviderConfigs>;
+const emptyCategoryProviderConfigs = (): CategoryProviderConfigs => ({ text: {}, image: {}, video: {} });
+/**
+ * The old store was keyed only by platform.  Split it once so a text model
+ * can never leak into an image/video setup again.  Only models that actually
+ * match a category are migrated; ambiguous old data is left out deliberately.
+ */
+const migrateCategoryProviderConfigs = (stored: OnlineProviderConfigs): CategoryProviderConfigs => {
+  const next = emptyCategoryProviderConfigs();
+  Object.entries(stored || {}).forEach(([provider, config]) => {
+    (['text', 'image', 'video'] as ModelCapability[]).forEach((capability) => {
+      const requested = config.defaultModels?.[capability] || '';
+      const model = requested && capabilitiesForModel(classifyProviderModel(requested)).includes(capability)
+        ? requested
+        : config.model && capabilitiesForModel(classifyProviderModel(config.model)).includes(capability)
+          ? config.model
+          : '';
+      const detectedModels = (config.detectedModels || []).filter((item) => capabilitiesForModel(item).includes(capability));
+      const matchingModel = providerModelMatches(provider, model, config.custom) ? model : '';
+      const matchingDetectedModels = detectedModels.filter((item) => providerModelMatches(provider, item.id, config.custom));
+      if (!matchingModel && !matchingDetectedModels.length) return;
+      next[capability][provider] = {
+        ...config,
+        model: matchingModel || matchingDetectedModels[0]?.id || '',
+        defaultModels: matchingModel ? { [capability]: matchingModel } : {},
+        capabilities: [capability],
+        detectedModels: matchingDetectedModels,
+      };
+    });
+  });
+  return next;
+};
 type PromptLibraryEntry = {
   id: string;
   text: string;
@@ -239,6 +283,13 @@ const ONLINE_PROVIDER_DEFAULTS: Record<string, Omit<OnlineProviderConfig, "apiKe
       { id: "gemini-2.5-flash-image", kind: "image", purpose: "旧版 Nano Banana / 低延迟 1K" },
     ],
   },
+  "Pollinations（免费测试）": {
+    endpoint: "https://gen.pollinations.ai/v1",
+    model: "flux",
+    protocol: "openai",
+    capabilities: ["image"],
+    detectedModels: [{ id: "flux", kind: "image", purpose: "免费测试 · 文生图（Flux）" }],
+  },
   "MiniMax Hailuo": { endpoint: "https://api.minimax.chat/v1", model: "MiniMax-Text-01", protocol: "openai", capabilities: ["text"] },
 };
 const classifyProviderModel = (id: string): DetectedProviderModel => {
@@ -269,7 +320,52 @@ const modelCapabilityLabel = (capability: ModelCapability) => capability === "te
 const providerForExplicitModelId = (id: string): string | undefined => {
   const value = id.trim().toLowerCase();
   if (/^kling(?:[-_.\s]|$)/.test(value)) return "可灵 Kling";
+  if (/^deepseek(?:[-_.\s]|$)/.test(value)) return "DeepSeek";
+  if (/^(qwen|wanx?|wan2|wan[-_.]?video)(?:[-_.\s]|$)/.test(value)) return "阿里百炼·万相";
+  if (/^(gpt|dall-e)(?:[-_.\s]|$)/.test(value)) return "OpenAI";
+  if (/^(gemini|nano[-_.]?banana)(?:[-_.\s]|$)/.test(value)) return "Google Nano Banana";
+  if (/^minimax(?:[-_.\s]|$)/.test(value)) return "MiniMax Hailuo";
   return undefined;
+};
+const providerModelMatches = (provider: string, model: string, custom?: boolean) => {
+  const owner = providerForExplicitModelId(model);
+  return Boolean(custom || !owner || owner === provider);
+};
+const sanitizeCategoryProviderConfigs = (configs: CategoryProviderConfigs): CategoryProviderConfigs => {
+  const next = emptyCategoryProviderConfigs();
+  (['text', 'image', 'video'] as ModelCapability[]).forEach((capability) => {
+    Object.entries(configs[capability] || {}).forEach(([provider, config]) => {
+      // Records are deliberately siloed by node type.  Older preview builds
+      // could leave an image model in the text record's model input; discard
+      // that model on load instead of letting it look like a shared setting.
+      const detectedModels = (config.detectedModels || []).filter((model) =>
+        providerModelMatches(provider, model.id, config.custom)
+        && capabilitiesForModel(model).includes(capability),
+      );
+      const storedModel = config.defaultModels?.[capability] || config.model || "";
+      const model = providerModelMatches(provider, storedModel, config.custom)
+        && capabilitiesForModel(classifyProviderModel(storedModel)).includes(capability)
+        ? storedModel
+        : detectedModels[0]?.id || "";
+      // DashScope's OpenAI-compatible endpoint is valid for compatible text
+      // calls, but it must never be used for Wan video tasks.  The video API
+      // has its own /api/v1 routes; repair records created by earlier shared
+      // configuration screens before they are shown or submitted again.
+      const endpoint = provider === "阿里百炼·万相" && capability === "video"
+        && /dashscope\.aliyuncs\.com\/compatible-mode/i.test(config.endpoint || "")
+        ? "https://dashscope.aliyuncs.com/api/v1"
+        : config.endpoint;
+      next[capability][provider] = {
+        ...config,
+        endpoint,
+        model,
+        defaultModels: model ? { [capability]: model } : {},
+        detectedModels,
+        capabilities: [capability],
+      };
+    });
+  });
+  return next;
 };
 const normalizeExplicitProviderModelId = (id: string): string => {
   const value = id.trim();
@@ -302,13 +398,15 @@ const repairMisplacedProviderModels = (stored: OnlineProviderConfigs): OnlinePro
 };
 const humanizeApiError = (error: unknown) => {
   const raw = String(error).replace(/^Error:\s*/i, "").replace(/\s+/g, " ").trim();
-  if (/HTTP 401|\b401\b|unauthenticated|invalid (api )?key|鉴权失败/i.test(raw)) return `鉴权失败：请检查 API Key / Access Key / Secret Key 是否正确、是否属于当前账户或项目。${raw ? `（${raw}）` : ""}`;
-  if (/HTTP 403|\b403\b|permission|forbidden|权限/i.test(raw)) return `权限不足：密钥有效，但当前项目、地区或模型没有调用权限。请在平台控制台开通模型或检查项目/区域。${raw ? `（${raw}）` : ""}`;
-  if (/HTTP 404|\b404\b|not found|找不到/i.test(raw)) return `找不到接口或模型：请检查接口地址、模型 ID，以及该模型是否已在平台控制台开通。${raw ? `（${raw}）` : ""}`;
-  if (/HTTP 429|\b429\b|rate limit|quota|余额|余额不足|insufficient/i.test(raw)) return `额度或频率受限：请检查余额、并发限制、套餐和平台配额。${raw ? `（${raw}）` : ""}`;
-  if (/timed? out|超时|timeout/i.test(raw)) return `请求超时：请检查网络、地区连通性，或稍后重试。视频任务也可到平台控制台查看状态。${raw ? `（${raw}）` : ""}`;
-  if (/network|连接|connect|dns|certificate/i.test(raw)) return `无法连接平台：请检查接口地址、网络代理、证书或地区网络限制。${raw ? `（${raw}）` : ""}`;
-  return raw || "未知错误，请打开运行日志并保留完整提示。";
+  // Status text is for action, not an unbounded transport dump. The full raw
+  // response is still written to the log at the call site.
+  if (/HTTP 401|\b401\b|unauthenticated|invalid (api )?key|鉴权失败/i.test(raw)) return "鉴权失败：请检查 API Key / Access Key / Secret Key 是否正确且属于当前项目。";
+  if (/HTTP 403|\b403\b|permission|forbidden|权限/i.test(raw)) return "权限不足：请在平台控制台开通该模型，并检查项目或地区权限。";
+  if (/HTTP 404|\b404\b|not found|找不到/i.test(raw)) return "找不到接口或模型：请检查接口地址、模型 ID，以及模型是否已开通。";
+  if (/HTTP 429|\b429\b|rate limit|quota|余额|余额不足|insufficient/i.test(raw)) return "额度或频率受限：请检查余额、并发限制、套餐和平台配额。";
+  if (/timed? out|超时|timeout/i.test(raw)) return "请求超时：请检查网络或地区连通性，稍后再试。";
+  if (/network|连接|connect|dns|certificate/i.test(raw)) return "无法连接平台：请检查接口地址、网络代理、证书或地区网络限制。";
+  return raw.length > 160 ? `${raw.slice(0, 157)}…` : raw || "未知错误，请打开运行日志查看详情。";
 };
 const typeLabel: Record<Kind, string> = {
   image: "图片",
@@ -618,12 +716,56 @@ const onlineVideoSizeForRatio = (ratio?: string): [number, number] => {
   const scale = Math.min(460 / rawWidth, 380 / rawHeight);
   return [Math.round(rawWidth * scale), Math.round(rawHeight * scale)];
 };
+const CANVAS_SPATIAL_BUCKET = 900;
+const buildCanvasSpatialIndex = (nodes: NodeItem[]) => {
+  const buckets = new Map<string, Set<string>>();
+  for (const node of nodes) {
+    const minColumn = Math.floor(node.x / CANVAS_SPATIAL_BUCKET);
+    const maxColumn = Math.floor((node.x + node.width) / CANVAS_SPATIAL_BUCKET);
+    const minRow = Math.floor(node.y / CANVAS_SPATIAL_BUCKET);
+    const maxRow = Math.floor((node.y + node.height) / CANVAS_SPATIAL_BUCKET);
+    for (let column = minColumn; column <= maxColumn; column += 1) {
+      for (let row = minRow; row <= maxRow; row += 1) {
+        const key = `${column}:${row}`;
+        const bucket = buckets.get(key) || new Set<string>();
+        bucket.add(node.id);
+        buckets.set(key, bucket);
+      }
+    }
+  }
+  return buckets;
+};
+const queryCanvasSpatialIndex = (
+  buckets: Map<string, Set<string>>,
+  bounds: { minX: number; minY: number; maxX: number; maxY: number },
+) => {
+  const ids = new Set<string>();
+  const minColumn = Math.floor(bounds.minX / CANVAS_SPATIAL_BUCKET);
+  const maxColumn = Math.floor(bounds.maxX / CANVAS_SPATIAL_BUCKET);
+  const minRow = Math.floor(bounds.minY / CANVAS_SPATIAL_BUCKET);
+  const maxRow = Math.floor(bounds.maxY / CANVAS_SPATIAL_BUCKET);
+  for (let column = minColumn; column <= maxColumn; column += 1) {
+    for (let row = minRow; row <= maxRow; row += 1) {
+      for (const id of buckets.get(`${column}:${row}`) || []) ids.add(id);
+    }
+  }
+  return ids;
+};
 const mediaKindFromName = (name?: string): Extract<Kind, "image" | "video" | "audio"> | null => {
   const value = (name || "").toLowerCase();
   if (/\.(mp3|wav|m4a|aac|flac|ogg|opus|wma)$/i.test(value)) return "audio";
   if (/\.(mp4|mov|mkv|avi|webm|m4v|wmv)$/i.test(value)) return "video";
   if (/\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(value)) return "image";
   return null;
+};
+const mediaMimeTypeFromName = (name: string) => {
+  const extension = name.split(".").pop()?.toLowerCase() || "";
+  const known: Record<string, string> = {
+    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", bmp: "image/bmp", avif: "image/avif",
+    mp4: "video/mp4", mov: "video/quicktime", mkv: "video/x-matroska", avi: "video/x-msvideo", webm: "video/webm", m4v: "video/x-m4v", wmv: "video/x-ms-wmv",
+    mp3: "audio/mpeg", wav: "audio/wav", m4a: "audio/mp4", aac: "audio/aac", flac: "audio/flac", ogg: "audio/ogg", opus: "audio/opus", wma: "audio/x-ms-wma",
+  };
+  return known[extension] || "application/octet-stream";
 };
 const defaultStoryboard = (): StoryboardRow[] => [
   { shot: "1", visual: "", dialogue: "" },
@@ -640,7 +782,10 @@ const storyboardText = (rows: StoryboardRow[] = []) =>
     .join("\n\n");
 function starter(): Project {
   return normalizeProject({
-    view: { x: 120, y: 92, zoom: 0.86 },
+    // Keep the complete opening composition centred in the usable canvas.
+    // The two notes are intentionally offset from the media cards so the
+    // default project reads as one balanced storyboard at first glance.
+    view: { x: 6, y: 96, zoom: 0.86 },
     links: [],
     nodes: [
       {
@@ -674,11 +819,11 @@ function starter(): Project {
         name: "输出 02", src: defaultPaperboatOutput, createdAt: Date.now(),
       },
       {
-        id: newId(), kind: "annotation", x: 95, y: 385, width: 250, height: annotationMetrics("情绪转折点。\n冷静的表象下是汹涌的告别。", 250).height,
+        id: newId(), kind: "annotation", x: 70, y: 205, width: 250, height: annotationMetrics("情绪转折点。\n冷静的表象下是汹涌的告别。", 250).height,
         name: "镜头批注", text: "情绪转折点。\n冷静的表象下是汹涌的告别。", fontSize: 19, rotation: -8, createdAt: Date.now(),
       },
       {
-        id: newId(), kind: "annotation", x: 1360, y: 480, width: 210, height: annotationMetrics("备选镜头：\n更克制，更留白。", 210).height,
+        id: newId(), kind: "annotation", x: 1375, y: 452, width: 210, height: annotationMetrics("备选镜头：\n更克制，更留白。", 210).height,
         name: "镜头批注", text: "备选镜头：\n更克制，更留白。", fontSize: 19, rotation: 7, createdAt: Date.now(),
       },
     ],
@@ -754,7 +899,9 @@ function VideoCanvas({
   onMetadata: (width: number, height: number) => void;
   onPlaybackError?: () => void;
 }) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [shouldLoad, setShouldLoad] = useState(false);
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
   const [loadError, setLoadError] = useState(false);
@@ -765,6 +912,21 @@ function VideoCanvas({
     setLoadError(false);
     setActiveSrc(src);
   }, [src, fallbackSrc]);
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element || typeof IntersectionObserver === "undefined") {
+      setShouldLoad(true);
+      return;
+    }
+    const root = element.closest(".canvas");
+    const observer = new IntersectionObserver(([entry]) => {
+      const visible = Boolean(entry?.isIntersecting);
+      if (!visible) videoRef.current?.pause();
+      setShouldLoad(visible);
+    }, { root, rootMargin: "320px" });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   const format = (seconds: number) => {
     const value = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
     return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
@@ -777,12 +939,13 @@ function VideoCanvas({
   };
   return (
     <div
+      ref={containerRef}
       className="canvas-video-player"
       onPointerDown={(event) => event.stopPropagation()}
-      onClick={toggle}
+      onClick={() => shouldLoad ? toggle() : setShouldLoad(true)}
       title="点击播放或暂停"
     >
-      <video
+      {shouldLoad ? <video
         ref={videoRef}
         preload="metadata"
         onLoadedMetadata={(event) => {
@@ -806,7 +969,7 @@ function VideoCanvas({
           onPlaybackError?.();
         }}
         src={activeSrc}
-      />
+      /> : <div className="canvas-video-sleep"><span>▶</span><small>视频进入视野后加载</small></div>}
       {loadError ? <div className="canvas-video-load-error">视频预览无法读取：本机缓存和 ComfyUI 原始结果都不可用。</div> : null}
       <div className="canvas-video-tools" aria-hidden="true">
         <time>{format(current)} / {format(duration)}</time>
@@ -878,6 +1041,113 @@ function CinematicLanding({
     </section>
   );
 }
+
+function BufferedProjectTextarea({
+  nodeId,
+  value,
+  onCommit,
+  className,
+  placeholder = "输入剧本、提示词、镜头说明或对白……",
+  autoFocus = true,
+  onDraft,
+  onSubmit,
+}: {
+  nodeId: string;
+  value: string;
+  onCommit: (value: string) => void;
+  className?: string;
+  placeholder?: string;
+  autoFocus?: boolean;
+  onDraft?: (value: string, field: HTMLTextAreaElement) => void;
+  onSubmit?: (value: string) => void;
+}) {
+  const fieldRef = useRef<HTMLTextAreaElement>(null);
+  const timerRef = useRef<number | null>(null);
+  const idleRef = useRef<number | null>(null);
+  const committed = useRef(value);
+  const commitRef = useRef(onCommit);
+  const draftRef = useRef(onDraft);
+  const submitRef = useRef(onSubmit);
+  commitRef.current = onCommit;
+  draftRef.current = onDraft;
+  submitRef.current = onSubmit;
+  useEffect(() => {
+    committed.current = value;
+    const field = fieldRef.current;
+    if (field && document.activeElement !== field && field.value !== value) field.value = value;
+  }, [nodeId, value]);
+  const cancelScheduledCommit = () => {
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = null;
+    if (idleRef.current !== null && "cancelIdleCallback" in window) {
+      window.cancelIdleCallback(idleRef.current);
+    }
+    idleRef.current = null;
+  };
+  const flush = () => {
+    cancelScheduledCommit();
+    const next = fieldRef.current?.value ?? committed.current;
+    if (next === committed.current) return;
+    committed.current = next;
+    commitRef.current(next);
+  };
+  const queueCommit = () => {
+    cancelScheduledCommit();
+    // Keep the native textarea local while the user is typing. Reconcile the
+    // project only after both the typing burst and current rendering work stop.
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null;
+      const commitWhenIdle = () => {
+        idleRef.current = null;
+        const next = fieldRef.current?.value ?? committed.current;
+        if (next === committed.current) return;
+        committed.current = next;
+        startTransition(() => commitRef.current(next));
+      };
+      if ("requestIdleCallback" in window) {
+        idleRef.current = window.requestIdleCallback(commitWhenIdle, { timeout: 3000 });
+      } else {
+        idleRef.current = setTimeout(commitWhenIdle, 0);
+      }
+    }, 900);
+  };
+  useEffect(() => () => flush(), [nodeId]);
+  return <textarea
+    ref={fieldRef}
+    className={className}
+    autoFocus={autoFocus}
+    defaultValue={value}
+    onInput={(event) => {
+      draftRef.current?.(event.currentTarget.value, event.currentTarget);
+      queueCommit();
+    }}
+    onKeyDown={(event) => {
+      if (event.key === "Enter" && !event.shiftKey && submitRef.current) {
+        event.preventDefault();
+        const next = event.currentTarget.value;
+        flush();
+        submitRef.current(next);
+      }
+    }}
+    onBlur={flush}
+    placeholder={placeholder}
+  />;
+}
+
+function OneShotGenerationTrigger({
+  requestId,
+  run,
+}: {
+  requestId: string;
+  run: () => void | Promise<void>;
+}) {
+  const runRef = useRef(run);
+  runRef.current = run;
+  useEffect(() => {
+    void runRef.current();
+  }, [requestId]);
+  return null;
+}
 export default function App() {
   const [project, setProject] = useState<Project>(() => initialWorkspace().project);
   const [historyId, setHistoryId] = useState(() => initialWorkspace().activeId);
@@ -936,6 +1206,11 @@ export default function App() {
   const [activeText, setActiveText] = useState<string | null>(null);
   const [editingAnnotation, setEditingAnnotation] = useState<string | null>(null);
   const [activeOnlineVideo, setActiveOnlineVideo] = useState<string | null>(null);
+  const [pendingVideoRegeneration, setPendingVideoRegeneration] = useState<{
+    requestId: string;
+    sourceNodeId: string;
+    prompt: string;
+  } | null>(null);
   const [onlinePopover, setOnlinePopover] = useState<{
     nodeId: string;
     kind: "reference" | "effect" | "character" | "camera" | "promptLibrary" | "settings" | "params";
@@ -992,13 +1267,20 @@ export default function App() {
   const [preferences, setPreferences] = useState(false);
   const [onlineApiOpen, setOnlineApiOpen] = useState(false);
   const [serviceConfigSection, setServiceConfigSection] = useState<"models" | "mcp">("models");
-  const [providerCapabilityFilter, setProviderCapabilityFilter] = useState<ModelCapability | "all">("all");
+  // Keep the configuration focused on the node type being configured.
+  const [providerCapabilityFilter, setProviderCapabilityFilter] = useState<ModelCapability | "all">("text");
   const [cloudPointsOpen, setCloudPointsOpen] = useState(false);
   const [onlineConfigTab, setOnlineConfigTab] = useState<"byok" | "cloud">("byok");
   const [onlineConfigProvider, setOnlineConfigProvider] = useState("阿里百炼·万相");
   const [providerModelDraft, setProviderModelDraft] = useState("");
+  // The API dialog is opened repeatedly from different node composers. Keep
+  // its unfinished model text while the user is configuring the same
+  // provider/capability; reopening must never look like it cleared a saved
+  // configuration. A deliberate provider or capability switch gets the
+  // corresponding saved default instead.
+  const providerDraftContextRef = useRef<string | null>(null);
   const [customProviderName, setCustomProviderName] = useState("");
-  const [addingCustomProvider, setAddingCustomProvider] = useState(false);
+  const [customProviderDraft, setCustomProviderDraft] = useState<OnlineProviderConfig | null>(null);
   const [discoveringModels, setDiscoveringModels] = useState(false);
   const [testingProvider, setTestingProvider] = useState(false);
   const [providerTestResult, setProviderTestResult] = useState<{ ok: boolean; text: string } | null>(null);
@@ -1011,6 +1293,20 @@ export default function App() {
       }
       return stored && typeof stored === "object" ? repairMisplacedProviderModels(stored) : {};
     } catch { return {}; }
+  });
+  const [categoryProviderConfigs, setCategoryProviderConfigs] = useState<CategoryProviderConfigs>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(CATEGORY_PROVIDER_STORE) || "null") as Partial<CategoryProviderConfigs> | null;
+      if (stored && typeof stored === "object" && stored.text && stored.image && stored.video) {
+        return sanitizeCategoryProviderConfigs({
+          text: stored.text || {},
+          image: stored.image || {},
+          video: stored.video || {},
+        });
+      }
+      const legacy = JSON.parse(localStorage.getItem(ONLINE_PROVIDER_STORE) || "{}") as OnlineProviderConfigs;
+      return migrateCategoryProviderConfigs(legacy && typeof legacy === "object" ? legacy : {});
+    } catch { return emptyCategoryProviderConfigs(); }
   });
   const [mcpServers, setMcpServers] = useState<McpServerConfig[]>(() => {
     try {
@@ -1061,6 +1357,11 @@ export default function App() {
   const [defaultSaveDir, setDefaultSaveDir] = useState(
     () => localStorage.getItem("ym-default-save-dir") || "",
   );
+  const [workspaceAssetDir, setWorkspaceAssetDir] = useState("");
+  const [autosaveMinutes, setAutosaveMinutes] = useState(() => normalizeAutosaveMinutes(
+    localStorage.getItem(AUTOSAVE_MINUTES_STORE) || DEFAULT_AUTOSAVE_MINUTES,
+  ));
+  const [autosaveMinutesDraft, setAutosaveMinutesDraft] = useState(() => String(autosaveMinutes));
   // The product uses one deliberate default visual language: noir editorial.
   // Keep the class for CSS scoping, but don't restore legacy colour themes.
   const resolvedTheme = "obsidian";
@@ -1087,45 +1388,57 @@ export default function App() {
     return () => document.removeEventListener("pointerdown", closeComposerFromOutside, true);
   }, [activeAiNode, activeOnlineVideo]);
 
-  const selectedOnlineProvider = onlineProviderConfigs[onlineConfigProvider]
-    ? { ...ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider], ...onlineProviderConfigs[onlineConfigProvider] }
-    : { ...ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider], apiKey: "" };
+  const configuredCategory = providerCapabilityFilter === "all" ? "text" : providerCapabilityFilter;
+  const categoryConfigs = categoryProviderConfigs[configuredCategory];
+  const resolvedProviderConfig = (provider: string, capability: ModelCapability) => {
+    const saved = categoryProviderConfigs[capability][provider];
+    const defaults = ONLINE_PROVIDER_DEFAULTS[provider];
+    return saved
+      ? { ...defaults, ...saved }
+      : defaults ? { ...defaults, apiKey: "", model: "", defaultModels: {}, detectedModels: [] } : undefined;
+  };
+  const selectedOnlineProvider = customProviderDraft || resolvedProviderConfig(onlineConfigProvider, configuredCategory)
+    || { endpoint: "", apiKey: "", model: "", protocol: "openai" as ProviderProtocol, capabilities: [configuredCategory], custom: true, detectedModels: [] };
   const selectedOnlineProviderModels = [
     ...((selectedOnlineProvider.detectedModels || []) as DetectedProviderModel[]),
-    ...((ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider]?.detectedModels || []) as DetectedProviderModel[]),
+    ...(customProviderDraft ? [] : (ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider]?.detectedModels || []) as DetectedProviderModel[]),
   ].filter((model, index, models) => models.findIndex((candidate) => candidate.id === model.id) === index);
   const editedProviderModelId = providerModelDraft.trim();
   const selectedOnlineProviderModel = selectedOnlineProviderModels.find((model) => model.id === editedProviderModelId);
   const selectedOnlineProviderModelCapabilities = editedProviderModelId
     ? capabilitiesForModel(selectedOnlineProviderModel || classifyProviderModel(editedProviderModelId))
     : [];
-  const openAiProvider = onlineProviderConfigs.OpenAI
-    ? { ...ONLINE_PROVIDER_DEFAULTS.OpenAI, ...onlineProviderConfigs.OpenAI }
-    : { ...ONLINE_PROVIDER_DEFAULTS.OpenAI, apiKey: openAiConfig.apiKey || "" };
+  const openAiProvider = resolvedProviderConfig("OpenAI", "text")
+    || { ...ONLINE_PROVIDER_DEFAULTS.OpenAI, apiKey: openAiConfig.apiKey || "" };
   const onlineProviderNames = [...new Set([...Object.keys(ONLINE_PROVIDER_DEFAULTS), ...Object.keys(onlineProviderConfigs)])];
-  const resolvedProviderConfig = (provider: string) => {
-    const defaults = ONLINE_PROVIDER_DEFAULTS[provider];
-    return onlineProviderConfigs[provider] ? { ...defaults, ...onlineProviderConfigs[provider] } : defaults;
+  const defaultModelForProvider = (provider: string, capability: ModelCapability) => {
+    const config = resolvedProviderConfig(provider, capability);
+    return config?.defaultModels?.[capability] || config?.model || "";
   };
   useEffect(() => {
     if (!onlineApiOpen || serviceConfigSection !== "models") return;
-    setProviderModelDraft(resolvedProviderConfig(onlineConfigProvider)?.model || "");
-  }, [onlineApiOpen, onlineConfigProvider, serviceConfigSection]);
+    const category = providerCapabilityFilter === "all" ? "text" : providerCapabilityFilter;
+    const context = `${onlineConfigProvider}::${category}`;
+    if (providerDraftContextRef.current === context) return;
+    providerDraftContextRef.current = context;
+    setProviderModelDraft(defaultModelForProvider(onlineConfigProvider, category));
+  }, [onlineApiOpen, onlineConfigProvider, providerCapabilityFilter, serviceConfigSection]);
   const capabilitiesForProvider = (provider: string): ModelCapability[] => {
-    const config = resolvedProviderConfig(provider);
+    const config = ONLINE_PROVIDER_DEFAULTS[provider];
     return [...new Set([
       ...(config?.capabilities || []),
       ...(config?.detectedModels || []).flatMap(capabilitiesForModel),
     ])];
   };
   const modelsForProvider = (provider: string, capability: ModelCapability) => {
-    const config = resolvedProviderConfig(provider);
+    const config = resolvedProviderConfig(provider, capability);
     const detectedModels = config?.detectedModels || [];
     const detected = detectedModels.filter((model) => capabilitiesForModel(model).includes(capability)).map((model) => model.id);
-    const configuredModel = config?.model
-      ? detectedModels.find((model) => model.id === config.model) || classifyProviderModel(config.model)
+    const configuredId = config?.defaultModels?.[capability] || config?.model;
+    const configuredModel = configuredId
+      ? detectedModels.find((model) => model.id === configuredId) || classifyProviderModel(configuredId)
       : null;
-    const configured = config?.model && configuredModel && capabilitiesForModel(configuredModel).includes(capability) ? [config.model] : [];
+    const configured = configuredId && configuredModel && capabilitiesForModel(configuredModel).includes(capability) ? [configuredId] : [];
     return [...new Set([...configured, ...detected])];
   };
   const compatibleModelForProvider = (
@@ -1143,14 +1456,14 @@ export default function App() {
    * generate, instead of opening the configuration dialog after every click.
    */
   const providerIsReadyFor = (provider: string, capability: ModelCapability) => {
-    if (!capabilitiesForProvider(provider).includes(capability)) return false;
-    const config = resolvedProviderConfig(provider);
-    const savedConfig = onlineProviderConfigs[provider];
+    const config = resolvedProviderConfig(provider, capability);
+    const savedConfig = categoryProviderConfigs[capability][provider];
+    if (!savedConfig) return false;
     if (!config?.endpoint?.trim()) return false;
     if (provider === "Ollama（本地）") {
       return Boolean(config.model?.trim() || modelsForProvider(provider, capability).length);
     }
-    if (provider === "OpenAI") return Boolean(openAiProvider.apiKey?.trim());
+    if (provider === "OpenAI") return Boolean(config?.apiKey?.trim());
     return Boolean(savedConfig?.apiKey?.trim());
   };
   const presetModelsForProvider = (provider: string, capability: ModelCapability) => {
@@ -1161,7 +1474,7 @@ export default function App() {
     if (capability === "image") return AI_IMAGE_PROVIDER_PRESETS[provider as keyof typeof AI_IMAGE_PROVIDER_PRESETS]?.models || [];
     return [];
   };
-  const readyProviderNamesFor = (capability: ModelCapability) => onlineProviderNames
+  const readyProviderNamesFor = (capability: ModelCapability) => Object.keys(categoryProviderConfigs[capability])
     .filter((provider) => providerIsReadyFor(provider, capability))
     .filter((provider) => modelsForProvider(provider, capability).length > 0 || presetModelsForProvider(provider, capability).length > 0);
   const textProviderOptions: AiProviderOption[] = readyProviderNamesFor("text")
@@ -1178,15 +1491,25 @@ export default function App() {
       return { name: provider, models, defaultModel: models[0] || "" };
     }),
   ];
-  const filteredOnlineProviderNames = onlineProviderNames.filter((provider) => providerCapabilityFilter === "all" || capabilitiesForProvider(provider).includes(providerCapabilityFilter));
+  const filteredOnlineProviderNames = [...new Set([
+    ...Object.keys(categoryConfigs),
+    ...Object.keys(ONLINE_PROVIDER_DEFAULTS).filter((provider) => capabilitiesForProvider(provider).includes(configuredCategory)),
+  ])];
   const activeMcpConfig = mcpServers.find((server) => server.id === activeMcpServer) || mcpServers[0] || null;
   const onlineVideoProviderNames = readyProviderNamesFor("video");
   const updateOnlineProviderConfig = (patch: Partial<OnlineProviderConfig>) => {
-    setOnlineProviderConfigs((current) => {
-      const base = current[onlineConfigProvider]
-        ? { ...ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider], ...current[onlineConfigProvider] }
-        : { ...ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider], apiKey: "" };
-      return { ...current, [onlineConfigProvider]: { ...base, ...patch } };
+    if (customProviderDraft) {
+      setCustomProviderDraft((current) => current ? { ...current, ...patch, custom: true, capabilities: [configuredCategory] } : current);
+      return;
+    }
+    setCategoryProviderConfigs((current) => {
+      const category = providerCapabilityFilter === "all" ? "text" : providerCapabilityFilter;
+      const existing = current[category][onlineConfigProvider];
+      const defaults = ONLINE_PROVIDER_DEFAULTS[onlineConfigProvider];
+      const base = existing
+        ? { ...defaults, ...existing }
+        : { ...defaults, endpoint: "", apiKey: "", model: "", defaultModels: {}, detectedModels: [], capabilities: [category] };
+      return { ...current, [category]: { ...current[category], [onlineConfigProvider]: { ...base, ...patch, capabilities: [category] } } };
     });
   };
   const addOrUpdateProviderModel = () => {
@@ -1195,6 +1518,7 @@ export default function App() {
       setMessage("请先填写要加入当前平台的模型 ID。");
       return;
     }
+    const category = providerCapabilityFilter === "all" ? "text" : providerCapabilityFilter;
     const targetProvider = providerForExplicitModelId(id);
     if (targetProvider && targetProvider !== onlineConfigProvider && !selectedOnlineProvider.custom) {
       const classified = classifyProviderModel(id);
@@ -1211,6 +1535,7 @@ export default function App() {
           [targetProvider]: {
             ...targetConfig,
             model: targetConfig.model || id,
+            defaultModels: { ...(targetConfig.defaultModels || {}), [category]: id },
             detectedModels,
             capabilities: [...new Set([...(targetConfig.capabilities || []), ...capabilitiesForModel(classified)])],
           },
@@ -1224,62 +1549,103 @@ export default function App() {
     }
     const classified = classifyProviderModel(id);
     const existing = selectedOnlineProviderModels.find((model) => model.id === id);
-    const model = existing || classified;
+    const knownCapabilities = capabilitiesForModel(existing || classified);
+    if (knownCapabilities.length > 0 && !knownCapabilities.includes(category)) {
+      setMessage(`“${id}”是${knownCapabilities.map(modelCapabilityLabel).join("/")}模型，不能加入当前“${modelCapabilityLabel(category)}”配置。`);
+      return;
+    }
+    const model: DetectedProviderModel = existing
+      ? { ...existing, capabilities: knownCapabilities }
+      : { ...classified, kind: category, capabilities: [category], purpose: `${modelCapabilityLabel(category)}生成模型` };
     const detectedModels = [
       ...(selectedOnlineProvider.detectedModels || []).filter((item) => item.id !== id),
       model,
     ];
     updateOnlineProviderConfig({
       model: selectedOnlineProvider.model || id,
+      defaultModels: { ...(selectedOnlineProvider.defaultModels || {}), [category]: id },
       detectedModels,
       capabilities: [...new Set([...(selectedOnlineProvider.capabilities || []), ...capabilitiesForModel(model)])],
     });
     setProviderModelDraft(id);
-    setMessage(`已把“${id}”加入“${onlineConfigProvider}”模型库；接口地址和密钥将由全部节点共用。`);
+    setMessage(`已把“${id}”保存为“${modelCapabilityLabel(category)}”模型；它会出现在对应节点的参数选择中。`);
   };
   const removeProviderModel = (id: string) => {
     const detectedModels = (selectedOnlineProvider.detectedModels || []).filter((model) => model.id !== id);
     const nextDefault = selectedOnlineProvider.model === id ? detectedModels[0]?.id || "" : selectedOnlineProvider.model;
     const capabilities = [...new Set(detectedModels.flatMap(capabilitiesForModel))];
-    updateOnlineProviderConfig({ detectedModels, model: nextDefault, capabilities });
+    const defaultModels = Object.fromEntries(Object.entries(selectedOnlineProvider.defaultModels || {}).filter(([, model]) => model !== id));
+    updateOnlineProviderConfig({ detectedModels, model: nextDefault, defaultModels, capabilities });
     if (providerModelDraft === id) setProviderModelDraft(nextDefault);
     setMessage(`已从“${onlineConfigProvider}”移除模型“${id}”；平台接口和密钥保持不变。`);
   };
   const setDefaultProviderModel = (id: string) => {
-    updateOnlineProviderConfig({ model: id });
+    const category = providerCapabilityFilter === "all" ? "text" : providerCapabilityFilter;
+    const model = selectedOnlineProviderModels.find((item) => item.id === id) || classifyProviderModel(id);
+    const detectedModels = (selectedOnlineProvider.detectedModels || []).some((item) => item.id === id)
+      ? selectedOnlineProvider.detectedModels || []
+      : [...(selectedOnlineProvider.detectedModels || []), { ...model, capabilities: capabilitiesForModel(model) }];
+    updateOnlineProviderConfig({
+      model: selectedOnlineProvider.model || id,
+      defaultModels: { ...(selectedOnlineProvider.defaultModels || {}), [category]: id },
+      detectedModels,
+    });
     setProviderModelDraft(id);
-    setMessage(`已将“${id}”设为“${onlineConfigProvider}”默认模型。`);
+    setMessage(`已将“${id}”设为“${onlineConfigProvider}”的默认${modelCapabilityLabel(category)}模型。`);
   };
-  const openOnlineConfiguration = (_tab: "byok" | "cloud", provider?: string) => {
-    if (provider && onlineProviderNames.includes(provider)) setOnlineConfigProvider(provider);
+  const openOnlineConfiguration = (_tab: "byok" | "cloud", provider?: string, capability?: ModelCapability) => {
+    if (provider && (onlineProviderNames.includes(provider) || Object.values(categoryProviderConfigs).some((configs) => Boolean(configs[provider])))) setOnlineConfigProvider(provider);
+    if (capability) setProviderCapabilityFilter(capability);
     setOnlineConfigTab("byok");
     setOnlineApiOpen(true);
   };
-  const addCustomProvider = () => {
-    const name = customProviderName.trim();
-    if (!name) { setMessage("请填写平台名称"); return; }
-    setOnlineProviderConfigs((current) => ({ ...current, [name]: current[name] || { endpoint: "", apiKey: "", model: "", protocol: "openai", capabilities: ["text"], custom: true, detectedModels: [] } }));
-    setOnlineConfigProvider(name);
+  const startCustomProvider = () => {
+    const category = providerCapabilityFilter === "all" ? "text" : providerCapabilityFilter;
     setCustomProviderName("");
-    setAddingCustomProvider(false);
+    setCustomProviderDraft({ endpoint: "", apiKey: "", model: "", protocol: "openai", capabilities: [category], custom: true, detectedModels: [] });
+    setProviderModelDraft("");
+    setProviderTestResult(null);
+  };
+  const removeConfiguredProvider = () => {
+    const category = providerCapabilityFilter === "all" ? "text" : providerCapabilityFilter;
+    if (!categoryProviderConfigs[category][onlineConfigProvider]) return;
+    setCategoryProviderConfigs((current) => {
+      const { [onlineConfigProvider]: _removed, ...remaining } = current[category];
+      return { ...current, [category]: remaining };
+    });
+    const nextProvider = filteredOnlineProviderNames.find((name) => name !== onlineConfigProvider) || "OpenAI";
+    setOnlineConfigProvider(nextProvider);
+    setProviderModelDraft("");
+    setProviderTestResult(null);
+    setMessage(`已删除${modelCapabilityLabel(category)}配置中的“${onlineConfigProvider}”。其他节点类型的同名配置不受影响。`);
   };
   const discoverProviderModels = async () => {
     if (!selectedOnlineProvider.endpoint?.trim()) { setMessage("请先填写接口地址"); return; }
+    if (onlineConfigProvider !== "Ollama（本地）" && !selectedOnlineProvider.apiKey?.trim()) { setMessage("请先填写 API Key"); return; }
     setDiscoveringModels(true);
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const ids = await invoke<string[]>("discover_api_models", { provider: onlineConfigProvider, endpoint: selectedOnlineProvider.endpoint, apiKey: selectedOnlineProvider.apiKey || "" });
-      const detectedModels = [...(selectedOnlineProvider.detectedModels || [])];
-      ids.map(classifyProviderModel).forEach((model) => {
+      const category = providerCapabilityFilter === "all" ? "text" : providerCapabilityFilter;
+      const discovered = ids
+        .map(classifyProviderModel)
+        .filter((model) => capabilitiesForModel(model).includes(category))
+        .filter((model) => providerModelMatches(onlineConfigProvider, model.id, selectedOnlineProvider.custom));
+      const detectedModels = (selectedOnlineProvider.detectedModels || [])
+        .filter((model) => capabilitiesForModel(model).includes(category));
+      discovered.forEach((model) => {
         const existing = detectedModels.findIndex((item) => item.id === model.id);
-        if (existing >= 0) detectedModels[existing] = model;
-        else detectedModels.push(model);
+        if (existing >= 0) detectedModels[existing] = { ...model, capabilities: [category], kind: category };
+        else detectedModels.push({ ...model, capabilities: [category], kind: category });
       });
-      const preferred = detectedModels.find((model) => model.kind === "video") || detectedModels.find((model) => model.kind !== "unknown");
-      const defaultModel = selectedOnlineProvider.model || preferred?.id || "";
-      updateOnlineProviderConfig({ detectedModels, model: defaultModel });
+      const defaultModel = selectedOnlineProvider.model && providerModelMatches(onlineConfigProvider, selectedOnlineProvider.model, selectedOnlineProvider.custom)
+        ? selectedOnlineProvider.model
+        : detectedModels[0]?.id || "";
+      updateOnlineProviderConfig({ detectedModels, model: defaultModel, defaultModels: defaultModel ? { [category]: defaultModel } : {} });
       setProviderModelDraft(defaultModel);
-      setMessage(`已识别 ${ids.length} 个模型：文本 ${detectedModels.filter((item) => item.kind === "text").length}、图片 ${detectedModels.filter((item) => item.kind === "image").length}、视频 ${detectedModels.filter((item) => item.kind === "video").length}`);
+      setMessage(discovered.length
+        ? `已从 ${onlineConfigProvider} 检索到 ${ids.length} 个模型，其中 ${discovered.length} 个可用于当前${modelCapabilityLabel(category)}节点。`
+        : `接口返回 ${ids.length} 个模型，但没有识别到可用于当前${modelCapabilityLabel(category)}节点的模型；可手动填写模型 ID。`);
     } catch (error) {
       setMessage(`模型识别失败：${String(error).replace(/^Error: /, "")}`);
     } finally { setDiscoveringModels(false); }
@@ -1373,7 +1739,7 @@ export default function App() {
   const cloudConfigured = Boolean(cloudSettings.endpoint.trim() && cloudSettings.accessToken.trim());
 
   // 有些 Windows 文件选择器会把音频 MIME 标成 video/*。用扩展名校正旧项目和新导入，
-  // 让 MP3 永远进入音频节点、素材库和导演台音轨。
+  // 让 MP3 永远进入音频节点、素材库和粗剪预览音轨。
   useEffect(() => {
     setProject((current) => {
       let changed = false;
@@ -1441,6 +1807,13 @@ export default function App() {
     side: "in" | "out";
   } | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [canvasSize, setCanvasSize] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  const transientView = useRef<Project["view"] | null>(null);
+  const transientNodePositions = useRef<Map<string, { x: number; y: number }>>(new Map());
   const fileRef = useRef<HTMLInputElement>(null);
   const onlineReferenceRef = useRef<HTMLInputElement>(null);
   const textMediaRef = useRef<HTMLInputElement>(null);
@@ -1450,6 +1823,7 @@ export default function App() {
   const [externalTextTarget, setExternalTextTarget] = useState<string | null>(
     null,
   );
+  const [externalDropActive, setExternalDropActive] = useState(false);
   const [apiPoint, setApiPoint] = useState<{ x: number; y: number } | null>(
     null,
   );
@@ -1627,19 +2001,50 @@ export default function App() {
     undoHistory.current = [];
   }, [historyId]);
   useEffect(() => {
-    // Save on a fixed wall-clock cadence. Refs always point at the active
-    // project, so continuous editing cannot postpone the ten-minute save and
-    // switching projects cannot make the timer write an old document.
-    const timer = window.setInterval(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const updateCanvasSize = () => {
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      setCanvasSize((current) => current.width === width && current.height === height
+        ? current
+        : { width, height });
+    };
+    updateCanvasSize();
+    const observer = new ResizeObserver(updateCanvasSize);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    // Save on the user's wall-clock cadence. Refs always point at the active
+    // project, so continuous editing cannot postpone the save and switching
+    // projects cannot make the timer write an old document.
+    let idleSave: number | null = null;
+    const save = () => {
+      idleSave = null;
       void persistProjectSnapshot(
         flushPendingFrameChange(),
         historyIdRef.current,
         projectNameRef.current,
         true,
       );
-    }, OFFLINE_AUTOSAVE_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, []);
+    };
+    const timer = window.setInterval(() => {
+      // localStorage serialization is synchronous. Use an idle slot so the
+      // autosave clock does not interrupt a keystroke or an active gesture.
+      if (idleSave !== null) return;
+      idleSave = "requestIdleCallback" in window
+        ? window.requestIdleCallback(save, { timeout: 15_000 })
+        : setTimeout(save, 750);
+    }, autosaveMinutes * 60 * 1000);
+    return () => {
+      window.clearInterval(timer);
+      if (idleSave !== null) {
+        if ("cancelIdleCallback" in window) window.cancelIdleCallback(idleSave);
+        else clearTimeout(idleSave);
+      }
+    };
+  }, [autosaveMinutes]);
   useEffect(() => {
     // `pagehide` covers the desktop WebView closing path and `beforeunload`
     // covers browser development mode. Both handlers are synchronous by
@@ -1661,8 +2066,27 @@ export default function App() {
     localStorage.setItem("ym-default-save-dir", defaultSaveDir);
   }, [defaultSaveDir]);
   useEffect(() => {
+    if (!isTauri()) return;
+    let active = true;
+    void import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke<string>("get_workspace_asset_root"))
+      .then((path) => {
+        if (active) setWorkspaceAssetDir(path);
+      })
+      .catch(() => {
+        if (active) setWorkspaceAssetDir("暂时无法读取本机素材目录");
+      });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    localStorage.setItem(AUTOSAVE_MINUTES_STORE, String(autosaveMinutes));
+  }, [autosaveMinutes]);
+  useEffect(() => {
     localStorage.setItem(ONLINE_PROVIDER_STORE, JSON.stringify(onlineProviderConfigs));
   }, [onlineProviderConfigs]);
+  useEffect(() => {
+    localStorage.setItem(CATEGORY_PROVIDER_STORE, JSON.stringify(categoryProviderConfigs));
+  }, [categoryProviderConfigs]);
   useEffect(() => {
     localStorage.setItem(MCP_SERVER_STORE, JSON.stringify(mcpServers));
   }, [mcpServers]);
@@ -2017,9 +2441,10 @@ export default function App() {
   };
   const world = (clientX: number, clientY: number) => {
     const rect = canvasRef.current!.getBoundingClientRect();
+    const view = transientView.current || projectRef.current.view;
     return {
-      x: (clientX - rect.left - project.view.x) / project.view.zoom,
-      y: (clientY - rect.top - project.view.y) / project.view.zoom,
+      x: (clientX - rect.left - view.x) / view.zoom,
+      y: (clientY - rect.top - view.y) / view.zoom,
     };
   };
   const viewportCenter = () => {
@@ -2126,7 +2551,9 @@ export default function App() {
   };
   const legacyMigrationPlan = useMemo(
     () => planLegacyMediaMigration(project, historyId),
-    [historyId, project],
+    // View movement does not change inline media. Avoid rescanning every node
+    // after a pan/zoom-only project update.
+    [historyId, project.nodes],
   );
   const migrateLegacyMedia = async () => {
     if (legacyMigrationProgress.running) return;
@@ -2301,6 +2728,7 @@ export default function App() {
     }));
     setActiveText(null);
     setActiveStoryboard(null);
+    setActiveAiNode(null);
     setActiveOnlineVideo(null);
     setActiveAiNode(nodeId);
   };
@@ -2383,10 +2811,7 @@ export default function App() {
     const targetNode = project.nodes.find((node) => node.id === targetId);
     const targetConfig = (targetNode?.workflow || {}) as OnlineVideoSettings;
     if ((targetConfig.source || "byok") === "byok") {
-      const savedProvider = onlineProviderConfigs[targetConfig.provider || ""];
-      const providerConfig = savedProvider
-        ? { ...ONLINE_PROVIDER_DEFAULTS[targetConfig.provider || ""], ...savedProvider }
-        : ONLINE_PROVIDER_DEFAULTS[targetConfig.provider || ""];
+      const providerConfig = resolvedProviderConfig(targetConfig.provider || "", "video");
       const model = compatibleModelForProvider(
         targetConfig.provider || "",
         "video",
@@ -2629,21 +3054,14 @@ export default function App() {
         video.src = src;
       }
     });
-  const addDroppedMedia = async (
-    file: File,
+  const commitDroppedMedia = async (
+    imported: ImportedWorkspaceMedia,
+    kind: Extract<Kind, "image" | "video" | "audio">,
+    fileName: string,
     at: { x: number; y: number },
+    sourceProjectId: string,
     textTarget?: string,
   ) => {
-    const sourceProjectId = historyIdRef.current;
-    const kind = mediaKind(file);
-    if (!kind) return;
-    let imported: ImportedWorkspaceMedia;
-    try {
-      imported = await storeMediaForProject(file, sourceProjectId);
-    } catch (error) {
-      setMessage(`无法导入素材“${file.name}”：${humanizeApiError(error)}`);
-      return;
-    }
     const src = imported.src;
     let width = nodeSize[kind][0];
     let height = nodeSize[kind][1];
@@ -2664,8 +3082,8 @@ export default function App() {
       y: at.y,
       width,
       height,
-      name: file.name,
-      fileName: file.name,
+      name: fileName,
+      fileName,
       src,
       localPath: imported.localPath,
       mediaWidth,
@@ -2678,7 +3096,7 @@ export default function App() {
     // file was reading is never overwritten by an old `project` closure.
     if (historyIdRef.current !== sourceProjectId) {
       const cleanupMessage = await discardUnattachedImport(imported);
-      setMessage(`已取消导入“${file.name}”：读取期间已切换项目。${cleanupMessage}`);
+      setMessage(`已取消导入“${fileName}”：读取期间已切换项目。${cleanupMessage}`);
       return;
     }
     let linkIssues: ReturnType<typeof appendTypedLink>["issues"] = [];
@@ -2696,6 +3114,23 @@ export default function App() {
     else setMessage(isTauri()
       ? "素材已安全存入桌面工作区并添加到画布"
       : "素材已添加到画布（浏览器预览模式仅保存小文件）");
+  };
+  const addDroppedMedia = async (
+    file: File,
+    at: { x: number; y: number },
+    textTarget?: string,
+  ) => {
+    const sourceProjectId = historyIdRef.current;
+    const kind = mediaKind(file);
+    if (!kind) return;
+    let imported: ImportedWorkspaceMedia;
+    try {
+      imported = await storeMediaForProject(file, sourceProjectId);
+    } catch (error) {
+      setMessage(`无法导入素材“${file.name}”：${humanizeApiError(error)}`);
+      return;
+    }
+    await commitDroppedMedia(imported, kind, file.name, at, sourceProjectId, textTarget);
   };
   const importExternalTextMedia = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -2870,7 +3305,7 @@ export default function App() {
         ? `；工作流：新增 ${workflowImport.report.added} 个、复用 ${workflowImport.report.reused.length} 个${workflowImport.report.remapped.length ? `，已隔离 ${workflowImport.report.remapped.length} 个同名 ID` : ""}${workflowImport.report.skipped.length ? `，跳过 ${workflowImport.report.skipped.length} 个不完整/重复条目` : ""}`
         : "";
       setMessage(isPortablePackage
-        ? `${sourceLabel}已打开，${companionImportIssue ? "附带导演台/工作流未能保存，请清理存储后重新导入；" : "导演台与工作流已恢复；"}${portabilityText}${workflowText}${credentialText}`
+        ? `${sourceLabel}已打开，${companionImportIssue ? "附带粗剪预览/工作流未能保存，请清理存储后重新导入；" : "粗剪预览与工作流已恢复；"}${portabilityText}${workflowText}${credentialText}`
         : `旧版${sourceLabel}已打开；${portabilityText}${credentialText}`);
       return true;
     } catch (error) {
@@ -3105,6 +3540,7 @@ export default function App() {
   };
   const canvasDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
+    setExternalDropActive(false);
     setDropTextTarget(null);
     const point = world(event.clientX, event.clientY);
     Array.from(event.dataTransfer.files).forEach((file, index) => {
@@ -3116,6 +3552,93 @@ export default function App() {
       }
     });
   };
+  const droppedFileName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() || "拖入文件";
+  const addNativeDroppedPath = async (path: string, at: { x: number; y: number }) => {
+    const fileName = droppedFileName(path);
+    const sourceProjectId = historyIdRef.current;
+    if (/\.json$/i.test(fileName)) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const raw = await invoke<string>("read_dropped_workflow_file", { path });
+        const data = JSON.parse(raw);
+        const kind = classifyProjectJson(data);
+        if (kind === "canvas" || kind === "comfy-ui") {
+          openProjectPackage(data, fileName, "拖入的项目");
+        } else if (kind === "comfy-api") {
+          addDroppedApiPayload(data, fileName, at, sourceProjectId);
+        } else {
+          setMessage("拖入的 JSON 既不是亿幕画布项目，也不是可运行的 ComfyUI API 工作流。");
+        }
+      } catch (error) {
+        setMessage(`无法读取拖入的工作流“${fileName}”：${humanizeApiError(error)}`);
+      }
+      return;
+    }
+    const kind = mediaKindFromName(fileName);
+    if (!kind) {
+      setMessage(`暂不支持拖入“${fileName}”；请选择图片、视频、音频或 API 工作流 JSON。`);
+      return;
+    }
+    try {
+      const asset = await importWorkspaceAssetFromPath({
+        projectId: sourceProjectId,
+        assetId: newId(),
+        sourcePath: path,
+        fileName,
+        mimeType: mediaMimeTypeFromName(fileName),
+      });
+      if (!asset.localPath) throw new Error("桌面素材仓储没有返回预览路径");
+      await commitDroppedMedia({
+        src: convertFileSrc(asset.localPath),
+        localPath: asset.localPath,
+        managedAsset: asset,
+      }, kind, fileName, at, sourceProjectId);
+    } catch (error) {
+      setMessage(`无法拖入素材“${fileName}”：${humanizeApiError(error)}`);
+    }
+  };
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      const appWindow = getCurrentWindow();
+      const scaleFactor = await appWindow.scaleFactor().catch(() => 1);
+      const removeListener = await appWindow.onDragDropEvent((event) => {
+        if (event.payload.type === "leave") {
+          setExternalDropActive(false);
+          return;
+        }
+        const position = event.payload.position;
+        const clientX = position.x / scaleFactor;
+        const clientY = position.y / scaleFactor;
+        const rect = canvasRef.current?.getBoundingClientRect();
+        const overCanvas = Boolean(rect && clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom);
+        if (event.payload.type === "enter" || event.payload.type === "over") {
+          setExternalDropActive(overCanvas);
+          return;
+        }
+        setExternalDropActive(false);
+        if (!overCanvas || !rect) {
+          setMessage("请把文件拖到画布空白区域后松开");
+          return;
+        }
+        const point = world(clientX, clientY);
+        const paths = event.payload.paths;
+        void (async () => {
+          for (const [index, path] of paths.entries()) {
+            await addNativeDroppedPath(path, { x: point.x + index * 32, y: point.y + index * 32 });
+          }
+        })();
+      });
+      if (disposed) removeListener();
+      else unlisten = removeListener;
+    })().catch((error) => setMessage(`桌面拖放初始化失败：${humanizeApiError(error)}`));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
   const wheel = (e: WheelEvent) => {
     e.preventDefault();
     const rect = canvasRef.current!.getBoundingClientRect();
@@ -3213,27 +3736,58 @@ export default function App() {
     }
     if (drag.current) {
       const d = drag.current;
-      frameChange((p) => ({
-        ...p,
-        view: {
-          ...p.view,
-          x: d.origin.x + e.clientX - d.startX,
-          y: d.origin.y + e.clientY - d.startY,
-        },
-      }));
+      const view = {
+        ...d.origin,
+        x: d.origin.x + e.clientX - d.startX,
+        y: d.origin.y + e.clientY - d.startY,
+      };
+      transientView.current = view;
+      if (gridRef.current) gridRef.current.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`;
     }
     if (moving.current) {
       const d = moving.current;
       const dx = (e.clientX - d.startX) / project.view.zoom,
         dy = (e.clientY - d.startY) / project.view.zoom;
-      frameChange((p) => ({
-        ...p,
-        nodes: p.nodes.map((n) =>
-          d.nodes[n.id]
-            ? (() => { let nx = d.nodes[n.id].x + dx; let ny = d.nodes[n.id].y + dy; if (d.groupBounds) { nx = Math.max(d.groupBounds.minX, Math.min(d.groupBounds.maxX - n.width, nx)); ny = Math.max(d.groupBounds.minY, Math.min(d.groupBounds.maxY - n.height, ny)); } return { ...n, x: nx, y: ny }; })()
-            : n,
-        )
-      }));
+      transientNodePositions.current.clear();
+      for (const node of project.nodes) {
+        const origin = d.nodes[node.id];
+        if (!origin) continue;
+        let x = origin.x + dx;
+        let y = origin.y + dy;
+        if (d.groupBounds) {
+          x = Math.max(d.groupBounds.minX, Math.min(d.groupBounds.maxX - node.width, x));
+          y = Math.max(d.groupBounds.minY, Math.min(d.groupBounds.maxY - node.height, y));
+        }
+        transientNodePositions.current.set(node.id, { x, y });
+        const element = gridRef.current?.querySelector<HTMLElement>(`[data-node-id="${node.id}"]`);
+        if (element) {
+          element.style.left = `${x}px`;
+          element.style.top = `${y}px`;
+        }
+      }
+      if (d.isGroupDrag && d.startBounds) {
+        const group = gridRef.current?.querySelector<HTMLElement>(`[data-group-id="${d.isGroupDrag}"]`);
+        if (group) {
+          group.style.left = `${d.startBounds.x + dx}px`;
+          group.style.top = `${d.startBounds.y + dy}px`;
+        }
+      }
+      const positions = transientNodePositions.current;
+      for (const link of project.links) {
+        if (!positions.has(link.from) && !positions.has(link.to)) continue;
+        const source = canvasNodeIndex.get(link.from);
+        const target = canvasNodeIndex.get(link.to);
+        const path = document.getElementById(`wire-${link.id}`);
+        if (!source || !target || !path) continue;
+        const sourcePosition = positions.get(source.id) || source;
+        const targetPosition = positions.get(target.id) || target;
+        const x1 = sourcePosition.x + source.width;
+        const y1 = sourcePosition.y + source.height / 2;
+        const x2 = targetPosition.x;
+        const y2 = targetPosition.y + target.height / 2;
+        const bend = Math.max(42, Math.abs(x2 - x1) * 0.38);
+        path.setAttribute("d", `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`);
+      }
     }
     if (linking.current) {
       const p = world(e.clientX, e.clientY);
@@ -3281,6 +3835,7 @@ export default function App() {
       setSelectionBox(null);
     }
     const mediaMove = moving.current;
+    const finalPositions = new Map(transientNodePositions.current);
     const moveDistance = mediaMove
       ? Math.hypot(e.clientX - mediaMove.startX, e.clientY - mediaMove.startY)
       : 0;
@@ -3343,6 +3898,7 @@ export default function App() {
       setProject((current) => {
         const next = {
           ...current,
+          nodes: current.nodes.map((node) => finalPositions.has(node.id) ? { ...node, ...finalPositions.get(node.id)! } : node),
           groups: (current.groups || []).map((group) => group.id === mediaMove.isGroupDrag && mediaMove.startBounds
             ? { ...group, bounds: { ...mediaMove.startBounds, x: mediaMove.startBounds.x + dx2, y: mediaMove.startBounds.y + dy2 } }
             : group),
@@ -3352,11 +3908,29 @@ export default function App() {
       });
       rememberMovement();
     } else if (mediaMove && !mediaAttached) {
+      setProject((current) => {
+        const next = {
+          ...current,
+          nodes: current.nodes.map((node) => finalPositions.has(node.id) ? { ...node, ...finalPositions.get(node.id)! } : node),
+        };
+        projectRef.current = next;
+        return next;
+      });
       rememberMovement();
+    }
+    const finalView = transientView.current;
+    if (finalView) {
+      setProject((current) => {
+        const next = { ...current, view: finalView };
+        projectRef.current = next;
+        return next;
+      });
     }
     setPanning(false);
     drag.current = null;
     moving.current = null;
+    transientView.current = null;
+    transientNodePositions.current.clear();
     linking.current = null;
     setDraftLink(null);
   };
@@ -3460,7 +4034,7 @@ export default function App() {
     setSelected(copies.map((n) => n.id));
   };
   const resetView = () =>
-    change((p) => ({ ...p, view: { x: 120, y: 92, zoom: 0.86 } }));
+    change((p) => ({ ...p, view: { x: 6, y: 96, zoom: 0.86 } }));
   const newProject = () => {
     if (!window.confirm("将开始一个新的默认项目。当前画布会被替换，建议先导出项目。是否继续？")) return;
     if (!flushActiveProjectSave()) {
@@ -3570,6 +4144,20 @@ export default function App() {
     } catch {
       setMessage("当前环境无法选择目录");
     }
+  };
+  const openWorkspaceAssetDir = async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("open_workspace_asset_root");
+    } catch (error) {
+      setMessage(`无法打开本机素材目录：${String(error)}`);
+    }
+  };
+  const commitAutosaveMinutes = () => {
+    const next = normalizeAutosaveMinutes(autosaveMinutesDraft);
+    setAutosaveMinutesDraft(String(next));
+    setAutosaveMinutes(next);
+    setMessage(`自动保存间隔已设为 ${next} 分钟`);
   };
   const closeApplication = async () => {
     if (!flushActiveProjectSave()) {
@@ -3692,9 +4280,17 @@ export default function App() {
   };
   useEffect(() => {
     void autoConnect(true);
-    const timer = window.setInterval(() => void autoConnect(true), 8000);
+    const checkVisibleConnection = () => {
+      if (document.visibilityState === "visible") void autoConnect(true);
+    };
+    // Connection discovery is informational while no task is being submitted.
+    // A 30-second cadence is responsive enough without continuously waking the
+    // desktop backend while the user is typing or arranging the canvas.
+    const timer = window.setInterval(checkVisibleConnection, 30_000);
+    window.addEventListener("focus", checkVisibleConnection);
     return () => {
       window.clearInterval(timer);
+      window.removeEventListener("focus", checkVisibleConnection);
       autoConnectSequence.current += 1;
     };
   }, []);
@@ -4208,39 +4804,40 @@ export default function App() {
     const provider = (settings.provider === "OpenAI 兼容" ? "OpenAI" : settings.provider || "OpenAI") as keyof typeof AI_TEXT_PROVIDER_PRESETS;
     const preset = AI_TEXT_PROVIDER_PRESETS[provider] || AI_TEXT_PROVIDER_PRESETS.OpenAI;
     if (provider === "阿里百炼·通义千问") {
-      return { provider, endpoint: preset.endpoint, apiKey: onlineProviderConfigs["阿里百炼·万相"]?.apiKey || "", model: settings.model || preset.defaultModel, visionModel: preset.visionModel };
+      const config = resolvedProviderConfig("阿里百炼·万相", "text");
+      return { provider, endpoint: config?.endpoint || preset.endpoint, apiKey: config?.apiKey || "", model: settings.model || config?.model || preset.defaultModel, visionModel: config?.model || preset.visionModel };
     }
     if (provider === "MiniMax") {
-      return { provider, endpoint: preset.endpoint, apiKey: onlineProviderConfigs["MiniMax Hailuo"]?.apiKey || "", model: settings.model || preset.defaultModel, visionModel: preset.visionModel };
+      const config = resolvedProviderConfig("MiniMax Hailuo", "text");
+      return { provider, endpoint: config?.endpoint || preset.endpoint, apiKey: config?.apiKey || "", model: settings.model || config?.model || preset.defaultModel, visionModel: config?.model || preset.visionModel };
     }
     if (provider === "Ollama（本地）") {
-      const config = onlineProviderConfigs["Ollama（本地）"]
-        ? { ...ONLINE_PROVIDER_DEFAULTS["Ollama（本地）"], ...onlineProviderConfigs["Ollama（本地）"] }
-        : ONLINE_PROVIDER_DEFAULTS["Ollama（本地）"];
+      const config = resolvedProviderConfig("Ollama（本地）", "text") || ONLINE_PROVIDER_DEFAULTS["Ollama（本地）"];
       const model = settings.model || config.model || "";
       return { provider, endpoint: config.endpoint, apiKey: "", model, visionModel: model };
     }
-    if (provider !== "OpenAI" && onlineProviderConfigs[provider]) {
-      const config = { ...ONLINE_PROVIDER_DEFAULTS[provider], ...onlineProviderConfigs[provider] };
-      return { provider, endpoint: config.endpoint, apiKey: config.apiKey || "", model: settings.model || config.model || "", visionModel: config.model || preset.visionModel };
+    if (provider !== "OpenAI" && categoryProviderConfigs.text[provider]) {
+      const config = resolvedProviderConfig(provider, "text")!;
+      const model = settings.model || config.model || "";
+      return { provider, endpoint: config.endpoint, apiKey: config.apiKey || "", model, visionModel: config.model || preset.visionModel };
     }
-    return { provider: "OpenAI" as const, endpoint: openAiProvider.endpoint || preset.endpoint, apiKey: openAiProvider.apiKey || "", model: settings.model || openAiProvider.model || preset.defaultModel, visionModel: preset.visionModel };
+    return { provider: "OpenAI" as const, endpoint: openAiProvider.endpoint || preset.endpoint, apiKey: openAiProvider.apiKey || "", model: settings.model || openAiProvider.model || preset.defaultModel, visionModel: openAiProvider.model || preset.visionModel };
   };
   const requestAiTextProviderConfiguration = (provider: string) => {
     if (provider === "阿里百炼·通义千问") {
-      openOnlineConfiguration("byok", "阿里百炼·万相");
+      openOnlineConfiguration("byok", "阿里百炼·万相", "text");
       setMessage("请保存阿里百炼 API Key；文本和图片理解会自动使用通义千问兼容接口。");
     } else if (provider === "MiniMax") {
-      openOnlineConfiguration("byok", "MiniMax Hailuo");
+      openOnlineConfiguration("byok", "MiniMax Hailuo", "text");
       setMessage("请保存 MiniMax API Key；文本和视觉模型会自动匹配。");
     } else if (provider === "Ollama（本地）") {
-      openOnlineConfiguration("byok", "Ollama（本地）");
+      openOnlineConfiguration("byok", "Ollama（本地）", "text");
       setMessage("请先测试本地 Ollama 连接并选择已安装的模型。");
     } else if (onlineProviderNames.includes(provider)) {
-      openOnlineConfiguration("byok", provider);
+      openOnlineConfiguration("byok", provider, "text");
       setMessage(`请完成“${provider}”的接口地址、API Key 和文本模型配置。`);
     } else {
-      openOnlineConfiguration("byok", "OpenAI");
+      openOnlineConfiguration("byok", "OpenAI", "text");
       setMessage("请填写 OpenAI 或兼容接口的地址、API Key 和模型。");
     }
   };
@@ -4288,11 +4885,16 @@ export default function App() {
       throw error;
     }
   };
-  const generateAiNode = async (node: NodeItem) => {
+  const generateAiNode = async (node: NodeItem, promptOverride?: string) => {
     const isTextGeneration = node.kind === "aiText" || node.kind === "text";
     const isImageGeneration = node.kind === "aiImage" || node.kind === "image";
     const isDirectNode = node.kind === "text" || node.kind === "image";
     const settings = (node.workflow || {}) as AiTextSettings & AiImageSettings;
+    const closeGenerationEditors = () => {
+      setActiveAiNode(null);
+      setPromptLibraryTarget(null);
+      setAtReferenceMenu(null);
+    };
     const isStoryboardFramesGeneration = isTextGeneration && settings.outputMode === "storyboardFrames";
     const upstreamNodes = project.links
       .filter((link) => link.to === node.id)
@@ -4301,7 +4903,7 @@ export default function App() {
     const upstreamText = upstreamNodes
       .map((item) => item.kind === "text" ? item.text || "" : item.kind === "storyboard" ? storyboardText(item.storyboard) : "")
       .filter((text) => text.trim());
-    const effectivePrompt = [settings.prompt || "", ...upstreamText].filter((text) => text.trim()).join("\n\n");
+    const effectivePrompt = promptOverride ?? [settings.prompt || "", ...upstreamText].filter((text) => text.trim()).join("\n\n");
     const upstreamImages = upstreamNodes
       .filter((item): item is NodeItem & { src: string } => item.kind === "image" && Boolean(item.src))
       .map((item) => ({ id: item.id, name: item.name, src: item.src }));
@@ -4358,51 +4960,54 @@ export default function App() {
     const textConnection = isTextGeneration ? getAiTextProviderConnection(settings as AiTextSettings) : null;
     const imageSettings = isImageGeneration ? settings as AiImageSettings : null;
     const imageProvider = imageSettings?.provider || "OpenAI";
-    const savedImageProviderConfig = onlineProviderConfigs[imageProvider];
-    const defaultImageProviderConfig = ONLINE_PROVIDER_DEFAULTS[imageProvider];
-    const imageProviderConfig: OnlineProviderConfig | undefined = savedImageProviderConfig
-      ? { ...defaultImageProviderConfig, ...savedImageProviderConfig }
-      : defaultImageProviderConfig ? { ...defaultImageProviderConfig, apiKey: "" } : undefined;
-    const savedGoogleConfig = onlineProviderConfigs["Google Nano Banana"];
-    const googleDefaults = ONLINE_PROVIDER_DEFAULTS["Google Nano Banana"];
-    const googleConfig = savedGoogleConfig ? { ...googleDefaults, ...savedGoogleConfig } : undefined;
+    const imageProviderConfig = resolvedProviderConfig(imageProvider, "image");
+    const googleConfig = resolvedProviderConfig("Google Nano Banana", "image");
     if (isTextGeneration && textConnection?.provider !== "Ollama（本地）" && !textConnection?.apiKey) {
       requestAiTextProviderConfiguration(textConnection?.provider || "OpenAI");
       return;
     }
     if (isTextGeneration && textConnection?.provider === "Ollama（本地）" && !textConnection!.model.trim()) {
-      openOnlineConfiguration("byok", "Ollama（本地）");
+      openOnlineConfiguration("byok", "Ollama（本地）", "text");
       setMessage("请先启动 Ollama，点击“自动读取并识别模型”，再选择已安装模型。 ");
       return;
     }
     if (isImageGeneration && imageProvider === "Google Nano Banana" && (!googleConfig?.endpoint || !googleConfig.apiKey)) {
-      openOnlineConfiguration("byok", "Google Nano Banana");
+      openOnlineConfiguration("byok", "Google Nano Banana", "image");
       setMessage("请先填写 Google AI Studio 的 Gemini API Key。");
       return;
     }
-    if (isImageGeneration && imageProvider === "OpenAI" && (!openAiProvider.endpoint || !openAiProvider.apiKey)) {
-      openOnlineConfiguration("byok", "OpenAI");
+    const openAiImageProvider = resolvedProviderConfig("OpenAI", "image");
+    if (isImageGeneration && imageProvider === "OpenAI" && (!openAiImageProvider?.endpoint || !openAiImageProvider.apiKey)) {
+      openOnlineConfiguration("byok", "OpenAI", "image");
       setMessage("请先填写 OpenAI 或兼容接口地址和 API Key。");
       return;
     }
-    if (isImageGeneration && !["OpenAI", "Google Nano Banana", "Midjourney（手动命令）"].includes(imageProvider) && (!imageProviderConfig?.capabilities?.includes("image") || imageProviderConfig.protocol !== "openai")) {
-      setMessage(`“${imageProvider}”没有可用的图片生成协议；请在 API 配置中将其设为“OpenAI 兼容”并启用图片能力。`);
+    if (isImageGeneration && !["OpenAI", "Google Nano Banana", "阿里百炼·万相", "Midjourney（手动命令）"].includes(imageProvider) && (!imageProviderConfig?.capabilities?.includes("image") || imageProviderConfig.protocol !== "openai")) {
+      setMessage(`“${imageProvider}”没有可用的图片生成协议；请配置支持图片生成的 OpenAI 兼容接口。`);
       return;
     }
     if (isImageGeneration && !["OpenAI", "Google Nano Banana", "Midjourney（手动命令）"].includes(imageProvider) && (!imageProviderConfig?.endpoint || !imageProviderConfig.apiKey || !imageSettings?.model)) {
-      openOnlineConfiguration("byok", imageProvider);
+      openOnlineConfiguration("byok", imageProvider, "image");
       setMessage(`请先完成“${imageProvider}”的接口地址、API Key 和图片模型配置。`);
       return;
     }
     const effectiveImageModel = imageSettings?.model
       || (imageProvider === "Google Nano Banana" ? googleConfig?.model : undefined)
-      || (imageProvider === "OpenAI" ? openAiProvider.model : imageProviderConfig?.model)
+      || (imageProvider === "OpenAI" ? openAiImageProvider?.model : imageProviderConfig?.model)
       || "gpt-image-1";
     const imageCapabilities = imageSettings && imageProvider !== "Midjourney（手动命令）"
       ? imageCapabilitiesFor(imageProvider, effectiveImageModel)
       : null;
+    // The editor exposes a shared parameter vocabulary. Do not silently
+    // replace a user's selected size or batch with a profile default; the
+    // capability check below reports the exact unsupported combination.
     const normalizedImageOptions = imageSettings && imageCapabilities
-      ? normalizeImageGenerationOptions(imageCapabilities, imageSettings)
+      ? {
+          ratio: imageSettings.ratio as ImageAspectRatio,
+          resolution: imageSettings.resolution as ImageResolution,
+          amount: Math.max(1, Math.min(5, Number(imageSettings.amount) || 1)),
+          quality: imageSettings.quality as ImageQuality,
+        }
       : null;
     if (imageSettings && imageCapabilities && normalizedImageOptions) {
       const optionErrors = validateImageGenerationOptions(imageCapabilities, {
@@ -4440,6 +5045,13 @@ export default function App() {
     const runToken = runRegistry.current.start(activeProjectIdRef.current, node.id);
     const runInputSignature = createExecutionInputSignature(inputProject, node.id);
     setRuntimeNodeStatus(node.id, "running");
+    const generationRecord: ApiGenerationRecord = {
+      kind: isTextGeneration ? "text" : "image",
+      sourceNodeId: node.id,
+      workflow: normalizedWorkflow,
+      prompt: effectivePrompt,
+      createdAt: Date.now(),
+    };
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       if (isTextGeneration) {
@@ -4492,6 +5104,7 @@ export default function App() {
             name: `AI 分镜画面（${rows.length}个）`,
             storyboard: rows,
             text: storyboardText(rows),
+            generationRecord,
             status: "done",
             createdAt: Date.now(),
           };
@@ -4501,14 +5114,15 @@ export default function App() {
           setSelected([output.id]);
           setMessage(`已生成 ${rows.length} 个分镜画面；可在分镜表格中继续添加或修改。`);
         } else if (isDirectNode) {
-          change((current) => ({ ...current, nodes: current.nodes.map((item) => item.id === node.id ? { ...item, text: result, status: "done" } : item) }));
+          change((current) => ({ ...current, nodes: current.nodes.map((item) => item.id === node.id ? { ...item, text: result, status: "done", generationRecord } : item) }));
           setMessage("AI 剧本已直接写入当前文本节点");
         } else {
-          const output: NodeItem = { id: newId(), kind: "text", x: node.x + node.width + 90, y: node.y, width: 420, height: 320, name: "AI 完整剧本", text: result, status: "done", createdAt: Date.now() };
+          const output: NodeItem = { id: newId(), kind: "text", x: node.x + node.width + 90, y: node.y, width: 420, height: 320, name: "AI 完整剧本", text: result, status: "done", generationRecord, createdAt: Date.now() };
           change((current) => appendTypedLink({ ...current, nodes: [...current.nodes.map((item) => item.id === node.id ? { ...item, status: "done" } : item), output] }, node.id, output.id).project);
           setMessage("完整剧本已生成并连接到画布");
         }
         runRegistry.current.finish(runToken.projectId, runToken.nodeId, runToken.runId);
+        closeGenerationEditors();
       } else {
         const currentImageSettings = { ...imageSettings!, ...(normalizedImageOptions || {}), model: effectiveImageModel };
         const fullPrompt = [effectivePrompt, `视觉风格：${currentImageSettings.style || "电影写实"}`, currentImageSettings.negativePrompt ? `避免：${currentImageSettings.negativePrompt}` : ""].filter(Boolean).join("\n");
@@ -4520,6 +5134,7 @@ export default function App() {
           const output: NodeItem = { id: newId(), kind: "text", x: node.x + node.width + 90, y: node.y, width: 520, height: 220, name: "Midjourney 手动命令", text: command, status: "done", createdAt: Date.now() };
           change((current) => ({ ...current, nodes: [...current.nodes.map((item) => item.id === node.id ? { ...item, status: "done" } : item), output] }));
           runRegistry.current.finish(runToken.projectId, runToken.nodeId, runToken.runId);
+          closeGenerationEditors();
           setMessage("Midjourney 官方未开放公共 API；已生成安全的手动命令并尝试复制，请到官方网页或 Discord 提交后导回结果。");
           return;
         }
@@ -4542,7 +5157,31 @@ export default function App() {
               normalizedImageOptions.resolution as ImageResolution,
             )
           : undefined;
-        const src = imageProvider === "Google Nano Banana"
+        const generatedSources = imageProvider === "阿里百炼·万相"
+          ? await (async () => {
+              // Qwen Image permits 1–6 images in a single task. Split the
+              // node's 1–10 batch into real provider tasks instead of showing
+              // an option that the request silently ignores.
+              let remaining = Math.max(1, Math.min(5, Number(currentImageSettings.amount) || 1));
+              const images: string[] = [];
+              while (remaining > 0) {
+                const batch = Math.min(6, remaining);
+                const result = await invoke<string[]>("generate_dashscope_image", {
+                  endpoint: imageProviderConfig!.endpoint,
+                  apiKey: imageProviderConfig!.apiKey,
+                  prompt: fullPrompt,
+                  model: effectiveImageModel,
+                  ratio: currentImageSettings.ratio || "1:1",
+                  resolution: currentImageSettings.resolution || "1024",
+                  amount: batch,
+                  imageData: referenceData[0] || null,
+                });
+                images.push(...result);
+                remaining -= batch;
+              }
+              return images;
+            })()
+          : [imageProvider === "Google Nano Banana"
           ? await invoke<string>("generate_google_image", {
               endpoint: googleConfig!.endpoint,
               apiKey: googleConfig!.apiKey,
@@ -4568,19 +5207,61 @@ export default function App() {
               prompt: fullPrompt,
               model: effectiveImageModel,
               size: requestSize,
-              quality: normalizedImageOptions?.quality,
-            });
+            quality: normalizedImageOptions?.quality,
+          })];
+        const src = generatedSources[0];
+        if (!src) throw new Error("图片接口没有返回生成结果");
+        if (!canCommitRunWithInputs(runToken, runInputSignature)) return;
+        // The request aspect ratio is not enough: providers can return an
+        // exact frame such as 576×1024. Decode it before creating the canvas
+        // card so the renderer does not crop that portrait image into the old
+        // fixed landscape 300×220 node.
+        const decodedImageDimensions = await readGeneratedMediaDimensions("image", src);
+        if (!canCommitRunWithInputs(runToken, runInputSignature)) return;
+        const imageCardSize = generatedMediaCardSize("image", decodedImageDimensions);
+        const imageName = `AI图片-${Date.now()}.png`;
+        const extraOutputs = await Promise.all(generatedSources.slice(1).map(async (extraSrc, index) => {
+          const dimensions = await readGeneratedMediaDimensions("image", extraSrc);
+          const card = generatedMediaCardSize("image", dimensions);
+          const output: NodeItem = {
+            id: newId(), kind: "image", x: node.x + node.width + 90, y: node.y + (index + 1) * (card.height + 34),
+            width: card.width, height: card.height, name: `AI图片-${Date.now()}-${index + 2}.png`, fileName: `AI图片-${Date.now()}-${index + 2}.png`, src: extraSrc, status: "done", createdAt: Date.now(),
+            mediaWidth: dimensions?.width || card.width, mediaHeight: dimensions?.height || card.height - 29,
+            generationRecord,
+          };
+          return output;
+        }));
         if (!canCommitRunWithInputs(runToken, runInputSignature)) return;
         if (isDirectNode) {
-          change((current) => ({ ...current, nodes: current.nodes.map((item) => item.id === node.id ? { ...item, status: "done", src, fileName: `AI图片-${Date.now()}.png` } : item) }));
+          change((current) => extraOutputs.reduce((next, output) => appendTypedLink(next, node.id, output.id).project, {
+            ...current,
+            nodes: [...current.nodes.map((item) => item.id === node.id ? {
+            ...item,
+            status: "done",
+            src,
+            fileName: imageName,
+            width: imageCardSize.width,
+            height: imageCardSize.height,
+            mediaWidth: decodedImageDimensions?.width || imageCardSize.width,
+            mediaHeight: decodedImageDimensions?.height || imageCardSize.height - 29,
+            generationRecord,
+          } : item), ...extraOutputs],
+          }));
           setMessage(`${imageProvider === "Google Nano Banana" ? "Nano Banana" : "OpenAI"} 图片已直接生成到当前图片节点`);
         } else {
-          const [width, height] = nodeSize.image;
-          const output: NodeItem = { id: newId(), kind: "image", x: node.x + node.width + 90, y: node.y, width, height, name: `AI图片-${Date.now()}.png`, fileName: `AI图片-${Date.now()}.png`, src, status: "done", createdAt: Date.now() };
-          change((current) => appendTypedLink({ ...current, nodes: [...current.nodes.map((item) => item.id === node.id ? { ...item, status: "done", src } : item), output] }, node.id, output.id).project);
+          const output: NodeItem = {
+            id: newId(), kind: "image", x: node.x + node.width + 90, y: node.y,
+            width: imageCardSize.width, height: imageCardSize.height,
+            name: imageName, fileName: imageName, src, status: "done", createdAt: Date.now(),
+            mediaWidth: decodedImageDimensions?.width || imageCardSize.width,
+            mediaHeight: decodedImageDimensions?.height || imageCardSize.height - 29,
+            generationRecord,
+          };
+          change((current) => [output, ...extraOutputs].reduce((next, generated) => appendTypedLink(next, node.id, generated.id).project, { ...current, nodes: [...current.nodes.map((item) => item.id === node.id ? { ...item, status: "done", src } : item), output, ...extraOutputs] }));
           setMessage(`${imageProvider === "Google Nano Banana" ? "Nano Banana" : "OpenAI"} 图片已生成并连接到画布${upstreamText.length ? `；已合并 ${upstreamText.length} 个文本输入` : ""}${references.length ? `；已使用 ${Math.min(references.length, 14)} 张参考图` : ""}`);
         }
         runRegistry.current.finish(runToken.projectId, runToken.nodeId, runToken.runId);
+        closeGenerationEditors();
       }
     } catch (error) {
       if (canCommitRunWithInputs(runToken, runInputSignature)) {
@@ -4589,6 +5270,103 @@ export default function App() {
         setMessage(`AI 生成失败：${humanizeApiError(error)}`);
       }
     }
+  };
+  const cloneGenerationWorkflow = (workflow: unknown) => {
+    if (!workflow || typeof workflow !== "object") return {};
+    return JSON.parse(JSON.stringify(workflow)) as Record<string, unknown>;
+  };
+  const apiGenerationContextFor = (targetId: string) => {
+    const snapshot = projectRef.current;
+    const target = snapshot.nodes.find((node) => node.id === targetId);
+    if (!target) return null;
+    const savedRecord = target.generationRecord;
+    const isApiGenerator = (candidate: NodeItem | undefined) => {
+      if (!candidate || !["aiText", "aiImage", "onlineVideo", "text", "image", "video"].includes(candidate.kind)) return false;
+      if (!candidate.workflow || typeof candidate.workflow !== "object") return false;
+      const workflow = candidate.workflow as { source?: GenerationSource; provider?: string; model?: string };
+      if (workflow.source === "comfy" || workflow.source === "cloud") return false;
+      return candidate.kind === "aiText" || candidate.kind === "aiImage" || candidate.kind === "onlineVideo" || Boolean(workflow.provider || workflow.model);
+    };
+    const linkedSource = snapshot.links
+      .filter((link) => link.to === target.id)
+      .map((link) => snapshot.nodes.find((node) => node.id === link.from))
+      .find(isApiGenerator);
+    const isDirectGeneratedTarget = ["text", "image", "video"].includes(target.kind)
+      && target.status === "done"
+      && Boolean(target.text || target.src);
+    const source = snapshot.nodes.find((node) => node.id === savedRecord?.sourceNodeId)
+      || linkedSource
+      || (isDirectGeneratedTarget && isApiGenerator(target) ? target : undefined);
+    if (!source || !isApiGenerator(source)) return null;
+    const sourceWorkflow = cloneGenerationWorkflow(savedRecord?.workflow || source.workflow);
+    const sourceKind: ApiGenerationRecord["kind"] = source.kind === "onlineVideo" || source.kind === "video"
+      ? "video"
+      : source.kind === "aiImage" || source.kind === "image"
+        ? "image"
+        : "text";
+    const linkedText = snapshot.links
+      .filter((link) => link.to === source.id)
+      .map((link) => snapshot.nodes.find((node) => node.id === link.from))
+      .map((node) => node?.kind === "text" ? node.text || "" : node?.kind === "storyboard" ? storyboardText(node.storyboard) : "")
+      .filter((text) => text.trim());
+    const record: ApiGenerationRecord = savedRecord || {
+      kind: sourceKind,
+      sourceNodeId: source.id,
+      workflow: sourceWorkflow,
+      prompt: [String(sourceWorkflow.prompt || ""), ...linkedText].filter((text) => text.trim()).join("\n\n"),
+      createdAt: target.createdAt || Date.now(),
+    };
+    return { target, source, record };
+  };
+  const restoreApiGenerationSource = (source: NodeItem, record: ApiGenerationRecord) => {
+    const workflow = cloneGenerationWorkflow(record.workflow);
+    const restored = { ...source, workflow };
+    change((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) => node.id === source.id ? restored : node),
+    }));
+    return restored;
+  };
+  const modifyApiGeneration = (targetId: string) => {
+    const context = apiGenerationContextFor(targetId);
+    if (!context) return;
+    restoreApiGenerationSource(context.source, context.record);
+    setActiveText(null);
+    setActiveStoryboard(null);
+    setPromptLibraryTarget(null);
+    setAtReferenceMenu(null);
+    if (context.record.kind === "video") {
+      setActiveAiNode(null);
+      setOnlinePopover(null);
+      setActiveOnlineVideo(context.source.id);
+    } else {
+      setActiveOnlineVideo(null);
+      setOnlinePopover(null);
+      setActiveAiNode(context.source.id);
+    }
+    setMenu(null);
+    setMessage("已恢复这次生成前的提示词、参考素材和参数，可修改后再次生成。");
+  };
+  const regenerateApiOutput = (targetId: string) => {
+    const context = apiGenerationContextFor(targetId);
+    if (!context) return;
+    const restored = restoreApiGenerationSource(context.source, context.record);
+    setMenu(null);
+    if (context.record.kind === "video") {
+      setActiveAiNode(null);
+      setActiveOnlineVideo(context.source.id);
+      setPendingVideoRegeneration({
+        requestId: newId(),
+        sourceNodeId: context.source.id,
+        prompt: context.record.prompt,
+      });
+      setMessage("已按该视频保存的原提示词和参数重新提交。");
+      return;
+    }
+    setActiveOnlineVideo(null);
+    setActiveAiNode(null);
+    setMessage(`正在按该${context.record.kind === "image" ? "图片" : "文本/分镜"}保存的原内容重新生成…`);
+    void generateAiNode(restored, context.record.prompt);
   };
   const resize = (e: PointerEvent, id: string) => {
     e.stopPropagation();
@@ -4687,34 +5465,62 @@ export default function App() {
     `M ${x1} ${y1} C ${x1 + Math.max(42, Math.abs(x2 - x1) * 0.38)} ${y1}, ${x2 - Math.max(42, Math.abs(x2 - x1) * 0.38)} ${y2}, ${x2} ${y2}`;
   const curveFromLeft = (x1: number, y1: number, x2: number, y2: number) =>
     `M ${x1} ${y1} C ${x1 - Math.max(42, Math.abs(x2 - x1) * 0.38)} ${y1}, ${x2 + Math.max(42, Math.abs(x2 - x1) * 0.38)} ${y2}, ${x2} ${y2}`;
-  const svgLinks = project.links.map((l) => {
-    const a = project.nodes.find((n) => n.id === l.from),
-      b = project.nodes.find((n) => n.id === l.to);
-    if (!a || !b) return null;
-    const x1 = a.x + a.width,
-      y1 = a.y + a.height / 2,
-      x2 = b.x,
-      y2 = b.y + b.height / 2;
-    const active = selected.includes(l.from) || selected.includes(l.to);
-    const selectedWire = selectedLinks.includes(l.id);
-    return (
-      <path
-        className={(active ? "active " : "") + (selectedWire ? "selected-wire" : "")}
-        key={l.id}
-        d={curve(x1, y1, x2, y2)}
-      />
-    );
-  });
-  const draftPath =
-    draftLink && project.nodes.find((n) => n.id === draftLink.from);
+  const canvasNodeIndex = useMemo(() => new Map(project.nodes.map((node) => [node.id, node])), [project.nodes]);
+  const canvasSpatialIndex = useMemo(() => buildCanvasSpatialIndex(project.nodes), [project.nodes]);
+  const draftPath = draftLink && canvasNodeIndex.get(draftLink.from);
   const portWorldSize = 14 / Math.min(1, project.view.zoom);
   const portStyle = {
     width: portWorldSize,
     height: portWorldSize,
     top: `calc(50% - ${portWorldSize / 2}px)`,
   };
+  // A render-time getBoundingClientRect() forced Chromium to complete layout
+  // before unrelated state updates, including prompt typing. ResizeObserver
+  // keeps the dimensions current without that synchronous layout barrier.
+  const viewportWidth = canvasSize.width;
+  const viewportHeight = canvasSize.height;
+  const overscan = 1200 / project.view.zoom;
+  const viewportBounds = {
+    minX: -project.view.x / project.view.zoom - overscan,
+    minY: -project.view.y / project.view.zoom - overscan,
+    maxX: (viewportWidth - project.view.x) / project.view.zoom + overscan,
+    maxY: (viewportHeight - project.view.y) / project.view.zoom + overscan,
+  };
+  const alwaysVisibleNodeIds = new Set([
+    ...selected,
+    activeText || "",
+    activeStoryboard || "",
+    activeOnlineVideo || "",
+  ]);
+  const nearbyNodeIds = queryCanvasSpatialIndex(canvasSpatialIndex, viewportBounds);
+  for (const id of alwaysVisibleNodeIds) if (id) nearbyNodeIds.add(id);
+  const visibleCanvasNodes = [...nearbyNodeIds]
+    .map((id) => canvasNodeIndex.get(id))
+    .filter((node): node is NodeItem => Boolean(node))
+    .filter((node) => alwaysVisibleNodeIds.has(node.id)
+      || (node.x < viewportBounds.maxX && node.x + node.width > viewportBounds.minX
+        && node.y < viewportBounds.maxY && node.y + node.height > viewportBounds.minY));
+  const visibleNodeIdSet = new Set(visibleCanvasNodes.map((node) => node.id));
+  const svgLinks = project.links.filter((link) => {
+    if (selectedLinks.includes(link.id) || visibleNodeIdSet.has(link.from) || visibleNodeIdSet.has(link.to)) return true;
+    const source = canvasNodeIndex.get(link.from);
+    const target = canvasNodeIndex.get(link.to);
+    if (!source || !target) return false;
+    const x1 = source.x + source.width, y1 = source.y + source.height / 2;
+    const x2 = target.x, y2 = target.y + target.height / 2;
+    return Math.min(x1, x2) < viewportBounds.maxX && Math.max(x1, x2) > viewportBounds.minX
+      && Math.min(y1, y2) < viewportBounds.maxY && Math.max(y1, y2) > viewportBounds.minY;
+  }).map((link) => {
+    const source = canvasNodeIndex.get(link.from)!;
+    const target = canvasNodeIndex.get(link.to)!;
+    const x1 = source.x + source.width, y1 = source.y + source.height / 2;
+    const x2 = target.x, y2 = target.y + target.height / 2;
+    const active = selected.includes(link.from) || selected.includes(link.to);
+    const selectedWire = selectedLinks.includes(link.id);
+    return <path id={`wire-${link.id}`} className={(active ? "active " : "") + (selectedWire ? "selected-wire" : "")} key={link.id} d={curve(x1, y1, x2, y2)} />;
+  });
   return (
-<main className={`app theme-${resolvedTheme}`} onContextMenu={(e) => e.preventDefault()}>
+<main className={`app theme-${resolvedTheme}${studioOpen ? " studio-open" : ""}`} onContextMenu={(e) => e.preventDefault()}>
       {cinematicLandingOpen && <CinematicLanding
         onEnterCanvas={() => setCinematicLandingOpen(false)}
         onOpenScript={() => {
@@ -4819,6 +5625,38 @@ export default function App() {
             <input value={defaultSaveDir} onChange={(e) => setDefaultSaveDir(e.target.value)} />
             <button onClick={chooseDefaultSaveDir}>更改</button>
           </div>
+          <label>本机素材存储位置</label>
+          <div className="setting-path managed-asset-path">
+            <input
+              aria-label="本机素材存储位置"
+              value={workspaceAssetDir || "正在读取本机素材目录…"}
+              readOnly
+              title={workspaceAssetDir}
+            />
+            <button onClick={() => void openWorkspaceAssetDir()} disabled={!workspaceAssetDir}>打开</button>
+          </div>
+          <small className="managed-asset-help">生成及导入的图片、视频和音频按项目保存在这里；该目录由程序管理。</small>
+          <div className="autosave-setting">
+            <label htmlFor="autosave-minutes">自动保存间隔</label>
+            <div className="autosave-minute-input">
+              <input
+                id="autosave-minutes"
+                aria-label="自动保存间隔（分钟）"
+                type="number"
+                min={MIN_AUTOSAVE_MINUTES}
+                max={MAX_AUTOSAVE_MINUTES}
+                step={1}
+                value={autosaveMinutesDraft}
+                onChange={(event) => setAutosaveMinutesDraft(event.target.value)}
+                onBlur={commitAutosaveMinutes}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") event.currentTarget.blur();
+                }}
+              />
+              <span>分钟</span>
+            </div>
+            <small>1–1440 分钟，修改后立即生效并保存在本机。</small>
+          </div>
           <b className="history-title">历史项目</b>
           <button className="log-button" onClick={() => setLogsOpen(!logsOpen)}>运行日志</button>
           {logsOpen && <div className="log-panel">{logs.length ? logs.map((log, index) => <small key={index}>{log}</small>) : <small>暂无日志</small>}</div>}
@@ -4835,29 +5673,38 @@ export default function App() {
       )}
       {onlineApiOpen && (
         <div className="online-provider-backdrop" onPointerDown={() => setOnlineApiOpen(false)}>
-          <section className="online-provider-dialog" onPointerDown={(event) => event.stopPropagation()}>
+          <section className={`online-provider-dialog ${serviceConfigSection === "models" ? "api-config-dialog" : "mcp-config-dialog"}`} onPointerDown={(event) => event.stopPropagation()}>
             <header>
               <div><span>工作流连接</span><b>{serviceConfigSection === "models" ? "模型 API 配置" : "MCP 工具配置"}</b><small>{serviceConfigSection === "models" ? "按文本、图片、视频能力独立管理平台与模型。" : "连接 Streamable HTTP MCP 服务并读取可用工具。"}</small></div>
-              <button className="dialog-close" title="关闭" onClick={() => setOnlineApiOpen(false)}>×</button>
             </header>
-            <nav className="online-provider-tabs" aria-label="在线服务来源">
-              <button className={serviceConfigSection === "models" ? "active" : ""} onClick={() => setServiceConfigSection("models")}>模型 API</button>
-              <button className={serviceConfigSection === "mcp" ? "active" : ""} onClick={() => setServiceConfigSection("mcp")}>MCP 工具</button>
-            </nav>
-            {serviceConfigSection === "models" ? <>
-              <label>平台
-                <span className="provider-select-row"><select value={onlineConfigProvider} onChange={(event) => { const provider = event.target.value; setOnlineConfigProvider(provider); setProviderModelDraft(resolvedProviderConfig(provider)?.model || ""); setProviderTestResult(null); }}>
-                  {onlineProviderNames.map((provider) => <option key={provider}>{provider}{onlineProviderConfigs[provider]?.custom ? " · 自定义" : ""}</option>)}
-                </select><button type="button" onClick={() => setAddingCustomProvider(!addingCustomProvider)}>＋ 添加平台</button></span>
+            {serviceConfigSection === "models" ? <div className="provider-config-grid">
+              <div className="provider-capability-tabs" aria-label="配置用途">
+                {(["text", "image", "video"] as ModelCapability[]).map((capability) => <button key={capability} type="button" className={providerCapabilityFilter === capability ? "active" : ""} onClick={() => {
+                  const savedProviders = Object.keys(categoryProviderConfigs[capability]);
+                  const available = [...new Set([
+                    ...savedProviders,
+                    ...Object.keys(ONLINE_PROVIDER_DEFAULTS).filter((provider) => capabilitiesForProvider(provider).includes(capability)),
+                  ])];
+                  // A category switch is a real context switch: load its own
+                  // saved provider/model, never leave the preceding tab's
+                  // unfinished model in the input.
+                  const nextProvider = savedProviders.includes(onlineConfigProvider)
+                    ? onlineConfigProvider
+                    : savedProviders[0] || available[0] || onlineConfigProvider;
+                  providerDraftContextRef.current = `${nextProvider}::${capability}`;
+                  setProviderCapabilityFilter(capability);
+                  setOnlineConfigProvider(nextProvider);
+                  setProviderModelDraft(defaultModelForProvider(nextProvider, capability));
+                  setProviderTestResult(null);
+                }}>{modelCapabilityLabel(capability)}配置</button>)}
+              </div>
+              <label className="provider-platform-field">{modelCapabilityLabel(providerCapabilityFilter === "all" ? "text" : providerCapabilityFilter)}平台
+                <span className="provider-select-row">{customProviderDraft ? <input autoFocus value={customProviderName} onChange={(event) => setCustomProviderName(event.target.value)} placeholder="输入新平台名称" aria-label="新平台名称" /> : <select value={onlineConfigProvider} onChange={(event) => { const provider = event.target.value; const category = providerCapabilityFilter === "all" ? "text" : providerCapabilityFilter; setOnlineConfigProvider(provider); setProviderModelDraft(defaultModelForProvider(provider, category)); setProviderTestResult(null); }}>
+                  {filteredOnlineProviderNames.map((provider) => <option key={provider}>{provider}{categoryConfigs[provider]?.custom ? " · 自定义" : ""}</option>)}
+                </select>}<button type="button" title={customProviderDraft ? "取消新增平台" : "添加平台"} onClick={() => customProviderDraft ? (setCustomProviderDraft(null), setCustomProviderName("")) : startCustomProvider()}>{customProviderDraft ? "取消" : "＋平台"}</button>{!customProviderDraft && categoryConfigs[onlineConfigProvider] && <button type="button" className="provider-delete-button" title="删除当前平台配置" aria-label="删除当前平台配置" onClick={removeConfiguredProvider}>×</button>}</span>
               </label>
-              {addingCustomProvider && <div className="custom-provider-add"><input autoFocus value={customProviderName} onChange={(event) => setCustomProviderName(event.target.value)} onKeyDown={(event) => event.key === "Enter" && addCustomProvider()} placeholder="平台名称，例如：我的 OpenAI 兼容服务" /><button onClick={addCustomProvider}>创建</button></div>}
-              <label>接口地址
+              <label className="provider-endpoint-field">接口地址
                 <input value={selectedOnlineProvider.endpoint} onChange={(event) => updateOnlineProviderConfig({ endpoint: event.target.value })} />
-              </label>
-              <label>接口协议
-                <select value={selectedOnlineProvider.protocol || "openai"} onChange={(event) => updateOnlineProviderConfig({ protocol: event.target.value as ProviderProtocol })} disabled={!selectedOnlineProvider.custom}>
-                  <option value="openai">OpenAI 兼容</option><option value="gemini">Google Gemini</option><option value="ollama">Ollama</option><option value="dashscope">阿里 DashScope</option><option value="kling">可灵</option><option value="volcengine">火山方舟</option>
-                </select>
               </label>
               {onlineConfigProvider === "可灵 Kling" && <label>认证方式
                 <select value={selectedOnlineProvider.klingAuth || "apiKey"} onChange={(event) => updateOnlineProviderConfig({ klingAuth: event.target.value as "apiKey" | "aksk", ...(event.target.value === "apiKey" ? { apiSecret: "" } : {}) })}>
@@ -4865,66 +5712,54 @@ export default function App() {
                   <option value="aksk">Access Key + Secret Key（旧版签名）</option>
                 </select>
               </label>}
-              {onlineConfigProvider !== "Ollama（本地）" && <label>{onlineConfigProvider === "可灵 Kling" ? (selectedOnlineProvider.klingAuth === "aksk" ? "Access Key" : "API Key") : onlineConfigProvider === "Google Nano Banana" ? "Gemini API Key" : "API 密钥"}
+              {onlineConfigProvider !== "Ollama（本地）" && <label className="provider-key-field">{onlineConfigProvider === "可灵 Kling" ? (selectedOnlineProvider.klingAuth === "aksk" ? "Access Key" : "API Key") : onlineConfigProvider === "Google Nano Banana" ? "Gemini API Key" : "API 密钥"}
                 <input type="password" value={selectedOnlineProvider.apiKey} onChange={(event) => updateOnlineProviderConfig({ apiKey: event.target.value })} placeholder={onlineConfigProvider === "可灵 Kling" ? (selectedOnlineProvider.klingAuth === "aksk" ? "粘贴可灵 Access Key" : "粘贴可灵单 API Key") : onlineConfigProvider === "Google Nano Banana" ? "粘贴 Google AI Studio 的 Gemini API Key" : "粘贴平台 API Key"} />
               </label>}
               {onlineConfigProvider === "可灵 Kling" && selectedOnlineProvider.klingAuth === "aksk" && <label>Secret Key
                 <input type="password" value={selectedOnlineProvider.apiSecret || ""} onChange={(event) => updateOnlineProviderConfig({ apiSecret: event.target.value })} placeholder="粘贴可灵 Secret Key（只保存在本机）" />
               </label>}
-              <section className="provider-model-library">
-                <header><div><b>平台模型库</b><small>接口地址和密钥只配置一次，下面所有模型与节点共用</small></div><button type="button" onClick={() => setProviderModelDraft("")}>＋ 添加模型</button></header>
-                {(selectedOnlineProvider.detectedModels || []).length > 0 ? <div className="provider-model-library-list">{(selectedOnlineProvider.detectedModels || []).map((model) => {
-                  const capabilities = capabilitiesForModel(model);
-                  const active = providerModelDraft === model.id;
-                  return <article className={active ? "active" : ""} key={model.id}>
-                    <button type="button" className="provider-model-library-main" onClick={() => setProviderModelDraft(model.id)}><b>{model.id}</b><small>{capabilities.length ? capabilities.map(modelCapabilityLabel).join(" / ") : "能力待确认"}</small></button>
-                    <div><button type="button" className={selectedOnlineProvider.model === model.id ? "default" : ""} disabled={selectedOnlineProvider.model === model.id} onClick={() => setDefaultProviderModel(model.id)}>{selectedOnlineProvider.model === model.id ? "默认" : "设为默认"}</button><button type="button" className="remove" onClick={() => removeProviderModel(model.id)}>移除</button></div>
-                  </article>;
-                })}</div> : <div className="provider-model-library-empty">还没有保存模型。点击“添加模型”，填写模型 ID 并选择能力即可。</div>}
-              </section>
-              <label>正在编辑的模型
-                <span className="provider-model-edit-row"><input
+              <label className="provider-model-field">{modelCapabilityLabel(providerCapabilityFilter === "all" ? "text" : providerCapabilityFilter)}模型
+                <input
                   list="online-provider-model-options"
                   value={providerModelDraft}
                   onChange={(event) => setProviderModelDraft(event.target.value)}
-                  onKeyDown={(event) => event.key === "Enter" && addOrUpdateProviderModel()}
-                  placeholder="输入模型 ID，例如 wan2.6-t2v"
+                  placeholder={providerCapabilityFilter === "video" ? "例如 wan2.6-t2v" : providerCapabilityFilter === "image" ? "例如 qwen-image-2.0" : "例如 deepseek-chat"}
                   spellCheck={false}
-                /><button type="button" disabled={!providerModelDraft.trim()} onClick={addOrUpdateProviderModel}>加入模型库</button></span>
+                />
                 {selectedOnlineProviderModels.length > 0 && <datalist id="online-provider-model-options">
-                  {selectedOnlineProviderModels.map((model) => <option value={model.id} key={model.id}>{model.purpose}</option>)}
+                  {selectedOnlineProviderModels.filter((model) => capabilitiesForModel(model).includes(providerCapabilityFilter === "all" ? "text" : providerCapabilityFilter)).map((model) => <option value={model.id} key={model.id}>{model.purpose}</option>)}
                 </datalist>}
-                <small className="provider-model-choice-note">添加或切换模型不会清空接口地址和 API 密钥。{selectedOnlineProviderModel?.purpose || (onlineConfigProvider === "可灵 Kling" ? "可灵任务列表不返回模型清单，可直接填写平台实际开放的模型 ID。" : "也可以先自动读取模型，再从模型库中选择。")}</small>
+                <small className="provider-model-choice-note">填一个当前节点要使用的模型即可；保存后只显示在对应节点。</small>
               </label>
-              {editedProviderModelId && <div className="provider-model-capabilities">
-                <span>这个模型用于</span>
-                {(["text", "image", "video"] as ModelCapability[]).map((capability) => <label key={capability}>
-                  <input
-                    type="checkbox"
-                    checked={selectedOnlineProviderModelCapabilities.includes(capability)}
-                    onChange={(event) => setConfiguredModelCapability(capability, event.target.checked)}
-                  />
-                  {modelCapabilityLabel(capability)}生成
-                </label>)}
-                <small>按模型真实的输出能力勾选，可多选；同一个模型会同时出现在相应节点中。</small>
-              </div>}
               <div className="provider-model-discovery">
-                {!["可灵 Kling", "豆包·火山方舟", "Google Nano Banana"].includes(onlineConfigProvider) && <button disabled={discoveringModels || !selectedOnlineProvider.endpoint?.trim()} onClick={() => void discoverProviderModels()}>{discoveringModels ? "正在读取模型…" : "自动读取并识别模型"}</button>}
-                <button className="provider-test-button" disabled={testingProvider || !selectedOnlineProvider.endpoint?.trim() || (onlineConfigProvider !== "Ollama（本地）" && !selectedOnlineProvider.apiKey?.trim())} onClick={() => void testOnlineProvider()}>{testingProvider ? "正在测试…" : "测试连接"}</button>
+                <button className="provider-discover-button" title="检索可用模型" aria-label="检索可用模型" disabled={discoveringModels || !selectedOnlineProvider.endpoint?.trim() || (onlineConfigProvider !== "Ollama（本地）" && !selectedOnlineProvider.apiKey?.trim())} onClick={() => void discoverProviderModels()}>{discoveringModels ? "…" : "⌕"}</button>
+                <button className="provider-test-button" title="测试连接" aria-label="测试连接" disabled={testingProvider || !selectedOnlineProvider.endpoint?.trim() || (onlineConfigProvider !== "Ollama（本地）" && !selectedOnlineProvider.apiKey?.trim())} onClick={() => void testOnlineProvider()}>{testingProvider ? "…" : "◉"}</button>
                 <small>{onlineConfigProvider === "Ollama（本地）" ? "测试会读取本机 Ollama 已安装模型；不需要 API Key，也不会创建生成任务。" : onlineConfigProvider === "Google Nano Banana" ? "测试会读取 Gemini 模型权限；不创建图片，不扣生成额度。" : onlineConfigProvider === "可灵 Kling" ? (selectedOnlineProvider.klingAuth === "aksk" ? "测试会用 Access Key + Secret Key 生成签名并读取任务列表；不创建视频任务。" : "测试会使用单 API Key 读取任务列表；不创建视频任务。") : onlineConfigProvider === "豆包·火山方舟" ? "测试会读取模型/推理接入点权限；不创建视频任务。" : "测试会访问模型接口，不会创建生成任务；密钥只在本机请求时使用。"}</small>
               </div>
-              {providerTestResult && <div className={`provider-test-result ${providerTestResult.ok ? "success" : "error"}`}>{providerTestResult.ok ? "✓ " : "! "}{providerTestResult.text}</div>}
-              <small className="online-provider-note">连接测试通过后，保存上方模型；系统会按模型能力在文本、图片、视频节点中显示对应选项。</small>
+              <div className={`provider-status ${providerTestResult ? (providerTestResult.ok ? "success" : "error") : "idle"}`} title={providerTestResult?.text || "尚未测试"}><i />{providerTestResult?.text || "尚未测试"}</div>
               <footer>
                 <button className="primary" onClick={() => {
                   const normalizedDraft = normalizeExplicitProviderModelId(providerModelDraft);
+                  const category = providerCapabilityFilter === "all" ? "text" : providerCapabilityFilter;
+                  const providerName = customProviderDraft ? customProviderName.trim() : onlineConfigProvider;
+                  if (!providerName) { setMessage("请先填写新平台名称，再保存配置。"); return; }
                   const targetProvider = providerForExplicitModelId(normalizedDraft);
-                  if (targetProvider && targetProvider !== onlineConfigProvider && !selectedOnlineProvider.custom) {
-                    addOrUpdateProviderModel();
+                  if (targetProvider && targetProvider !== providerName && !selectedOnlineProvider.custom) {
+                    setOnlineConfigProvider(targetProvider);
+                    setProviderModelDraft(normalizedDraft);
+                    setMessage(`“${normalizedDraft}”属于“${targetProvider}”，不能保存到“${providerName}”。已切换到正确平台，请填写该平台的接口和密钥后保存。`);
                     return;
                   }
-                  const draftModel = normalizedDraft
+                  const rawDraftModel = normalizedDraft
                     ? selectedOnlineProviderModels.find((model) => model.id === normalizedDraft) || classifyProviderModel(normalizedDraft)
+                    : null;
+                  const draftCapabilities = rawDraftModel ? capabilitiesForModel(rawDraftModel) : [];
+                  if (normalizedDraft && draftCapabilities.length > 0 && !draftCapabilities.includes(category)) {
+                    setMessage(`“${normalizedDraft}”不是${modelCapabilityLabel(category)}模型，无法保存到当前配置。`);
+                    return;
+                  }
+                  const draftModel = rawDraftModel && normalizedDraft
+                    ? (draftCapabilities.length ? rawDraftModel : { ...rawDraftModel, kind: category, capabilities: [category], purpose: `${modelCapabilityLabel(category)}生成模型` })
                     : null;
                   const detectedModels = draftModel
                     ? [...(selectedOnlineProvider.detectedModels || []).filter((model) => model.id !== normalizedDraft), draftModel]
@@ -4932,20 +5767,31 @@ export default function App() {
                   const normalizedModel = normalizeExplicitProviderModelId(selectedOnlineProvider.model || normalizedDraft);
                   const providerConfig = {
                     ...selectedOnlineProvider,
+                    custom: selectedOnlineProvider.custom || Boolean(customProviderDraft),
                     model: normalizedModel,
+                    defaultModels: normalizedDraft ? { ...(selectedOnlineProvider.defaultModels || {}), [category]: normalizedDraft } : selectedOnlineProvider.defaultModels,
                     detectedModels,
                     capabilities: [...new Set(detectedModels.flatMap(capabilitiesForModel))],
                   } as OnlineProviderConfig;
-                  const next = { ...onlineProviderConfigs, [onlineConfigProvider]: providerConfig };
-                  setOnlineProviderConfigs(next);
-                  localStorage.setItem(ONLINE_PROVIDER_STORE, JSON.stringify(next));
+                  const next = { ...categoryProviderConfigs, [category]: { ...categoryProviderConfigs[category], [providerName]: { ...providerConfig, capabilities: [category] } } };
+                  setCategoryProviderConfigs(next);
+                  localStorage.setItem(CATEGORY_PROVIDER_STORE, JSON.stringify(next));
                   setMessage(normalizedModel !== selectedOnlineProvider.model
-                    ? `${onlineConfigProvider} 已保存；模型名称已按可灵 API 纠正为 ${normalizedModel}`
-                    : `${onlineConfigProvider} 已保存：1 套平台密钥，${providerConfig.detectedModels?.length || 0} 个模型供全部节点共用`);
+                    ? `${providerName} 已保存；模型名称已按可灵 API 纠正为 ${normalizedModel}`
+                    : `${providerName} 已保存：${modelCapabilityLabel(category)}节点会使用上方模型，其他节点配置互不干扰。`);
+                  // A later reopen must reflect the just-saved model, rather
+                  // than an old unsaved draft that happened to be left in the
+                  // dialog before clicking Save.
+                  providerDraftContextRef.current = null;
+                  if (customProviderDraft) {
+                    setOnlineConfigProvider(providerName);
+                    setCustomProviderDraft(null);
+                    setCustomProviderName("");
+                  }
                   setOnlineApiOpen(false);
                 }}>保存本机配置</button>
               </footer>
-            </> : <>
+            </div> : <>
               <div className="mcp-config-layout">
                 <aside><button className="mcp-add" onClick={addMcpServer}>＋ 添加 MCP 服务</button>{mcpServers.map((server) => <button className={activeMcpConfig?.id === server.id ? "active" : ""} key={server.id} onClick={() => setActiveMcpServer(server.id)}><b>{server.name}</b><small>{server.lastStatus || "尚未测试"}</small></button>)}</aside>
                 <main>{activeMcpConfig ? <>
@@ -4991,14 +5837,20 @@ export default function App() {
       >
         {studioOpen ? "‹ 收起工作台" : "创作工作台 ›"}
       </button>
-      <aside className={`studio-sidebar ${studioOpen ? "open" : ""}`}>
+      <aside className={`studio-sidebar ${studioOpen ? "open" : ""}`} onWheel={(event) => event.stopPropagation()}>
         <div className="sidebar-title">
           <span className="brand-mark">✦</span>
           <div>
             <b>创作工作台</b>
-            <small>本地项目 · 每 10 分钟自动保存</small>
+            <small>本地项目 · 每 {autosaveMinutes} 分钟自动保存</small>
           </div>
-          <button className="director-mode-button" onClick={openDirectorMode} title="打开导演台">导演模式</button>
+          <button className="director-mode-button" onClick={openDirectorMode} title="打开粗剪预览，编排并检查镜头、视频、音频和字幕">
+            <span>
+              <strong>粗剪预览</strong>
+              <small>编排并预览镜头、音轨与字幕</small>
+            </span>
+            <em>预览编辑</em>
+          </button>
         </div>
         <section className="project-overview">
           <span>当前创作链路</span>
@@ -5081,7 +5933,7 @@ export default function App() {
               onClick={() => {
                 const activeVideoProvider = ((activeOnlineVideoNode?.workflow || {}) as OnlineVideoSettings).provider;
                 setServiceConfigSection("models");
-                openOnlineConfiguration("byok", activeVideoProvider && activeVideoProvider !== "未选择平台" ? activeVideoProvider : undefined);
+                openOnlineConfiguration("byok", activeVideoProvider && activeVideoProvider !== "未选择平台" ? activeVideoProvider : undefined, "video");
               }}
             >
               <b>◌</b>
@@ -5207,9 +6059,18 @@ export default function App() {
         onPointerUp={canvasUp}
         onAuxClick={(event) => { if (event.button === 1) event.preventDefault(); }}
         onContextMenu={canvasMenu}
-        onDragOver={(event) => event.preventDefault()}
+        onDragEnter={(event) => { event.preventDefault(); setExternalDropActive(true); }}
+        onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; setExternalDropActive(true); }}
+        onDragLeave={(event) => {
+          const next = event.relatedTarget;
+          if (!(next instanceof Node) || !event.currentTarget.contains(next)) setExternalDropActive(false);
+        }}
         onDrop={canvasDrop}
       >
+        {externalDropActive && <div className="canvas-drop-hint" aria-live="polite">
+          <b>松开即可加入画布</b>
+          <span>支持图片、视频、音频和 API 工作流 JSON</span>
+        </div>}
         {selectedLinks.length > 0 && (
           <button
             className="disconnect-selected-links"
@@ -5224,6 +6085,7 @@ export default function App() {
           >断开已选连线（{selectedLinks.length}）</button>
         )}
         <div
+          ref={gridRef}
           className="grid"
           style={{
             transform: `translate(${project.view.x}px, ${project.view.y}px) scale(${project.view.zoom})`,
@@ -5263,17 +6125,20 @@ export default function App() {
               style={{ position: "absolute", left: lineSelectionBox.x, top: lineSelectionBox.y, width: lineSelectionBox.width, height: lineSelectionBox.height, border: "1px dashed #ffbf7b", background: "#ffbd5319", pointerEvents: "none", zIndex: 11 }}
             />
           )}
-              {(project.groups || []).map((g) => {
-                const gn = g.nodeIds.map((id) => project.nodes.find((n) => n.id === id)).filter((n): n is NodeItem => !!n);
+              {(project.groups || []).filter((group) =>
+                group.bounds.x < viewportBounds.maxX && group.bounds.x + group.bounds.w > viewportBounds.minX
+                && group.bounds.y < viewportBounds.maxY && group.bounds.y + group.bounds.h > viewportBounds.minY,
+              ).map((g) => {
+                const gn = g.nodeIds.map((id) => canvasNodeIndex.get(id)).filter((n): n is NodeItem => !!n);
                 if (gn.length < 2) return null;
                 const minX = g.bounds.x;
                 const minY = g.bounds.y;
                 const maxX = g.bounds.x + g.bounds.w;
                 const maxY = g.bounds.y + g.bounds.h;
-                const gnds = Object.fromEntries(project.nodes.filter((x) => g.nodeIds.includes(x.id)).map((x) => [x.id, { x: x.x, y: x.y }]));
-                return <div key={g.id} className="node-group" style={{ position: "absolute", left: minX, top: minY, width: maxX - minX, height: maxY - minY }} onPointerDown={(e) => { if (e.button !== 0) return; moving.current = { startX: e.clientX, startY: e.clientY, nodes: gnds, isGroupDrag: g.id, startBounds: { x: g.bounds.x, y: g.bounds.y, w: g.bounds.w, h: g.bounds.h }, startProject: project }; }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenu({ x: e.clientX, y: e.clientY, node: "__group_" + g.id }); }}><span className="node-group-name" title="双击重新命名" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => { e.stopPropagation(); setGroupNameInput(g.id); }}>{g.name}</span></div>;
+                const gnds = Object.fromEntries(gn.map((x) => [x.id, { x: x.x, y: x.y }]));
+                return <div key={g.id} data-group-id={g.id} className="node-group" style={{ position: "absolute", left: minX, top: minY, width: maxX - minX, height: maxY - minY }} onPointerDown={(e) => { if (e.button !== 0) return; moving.current = { startX: e.clientX, startY: e.clientY, nodes: gnds, isGroupDrag: g.id, startBounds: { x: g.bounds.x, y: g.bounds.y, w: g.bounds.w, h: g.bounds.h }, startProject: project }; }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenu({ x: e.clientX, y: e.clientY, node: "__group_" + g.id }); }}><span className="node-group-name" title="双击重新命名" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => { e.stopPropagation(); setGroupNameInput(g.id); }}>{g.name}</span></div>;
               })}
-          {project.nodes.map((n) => (
+          {visibleCanvasNodes.map((n) => (
             <article
               key={n.id}
               data-node-id={n.id}
@@ -5384,6 +6249,8 @@ export default function App() {
                 (n.src ? (
                   <img
                     draggable={false}
+                    loading="lazy"
+                    decoding="async"
                     src={n.src}
                     alt={n.name}
                     style={{ objectFit: "cover" }}
@@ -5461,7 +6328,7 @@ export default function App() {
                     </button>
                     <button className="node-add-ai" onPointerDown={(e) => e.stopPropagation()} onClick={() => {
                       const provider = onlineVideoProviderNames[0] || "未选择平台";
-                      const model = modelsForProvider(provider, "video")[0] || resolvedProviderConfig(provider)?.model || "";
+                      const model = modelsForProvider(provider, "video")[0] || resolvedProviderConfig(provider, "video")?.model || "";
                       const capabilities = videoCapabilitiesFor(provider, model);
                       change((p) => ({ ...p, nodes: p.nodes.map((node) => node.id === n.id ? { ...node, workflow: node.workflow || { source: "byok", provider, model, mode: capabilities.modes[0], ratio: "16:9", quality: "720P", duration: 5, amount: 1, audio: true } satisfies OnlineVideoSettings } : node) }));
                       setActiveText(null); setActiveStoryboard(null); setActiveAiNode(null); setActiveOnlineVideo(n.id);
@@ -5549,9 +6416,7 @@ export default function App() {
                   audio: true,
                   ...((n.workflow || {}) as OnlineVideoSettings),
                 };
-                const nodeProviderConfig = onlineProviderConfigs[config.provider || ""]
-                  ? { ...ONLINE_PROVIDER_DEFAULTS[config.provider || ""], ...onlineProviderConfigs[config.provider || ""] }
-                  : ONLINE_PROVIDER_DEFAULTS[config.provider || ""];
+                const nodeProviderConfig = resolvedProviderConfig(config.provider || "", "video");
                 const nodeModel = compatibleModelForProvider(
                   config.provider || "",
                   "video",
@@ -5595,9 +6460,7 @@ export default function App() {
                     <span className="online-video-signal" />
                     <select value={config.provider} onChange={(event) => {
                       const provider = event.target.value;
-                      const saved = onlineProviderConfigs[provider];
-                      const defaults = ONLINE_PROVIDER_DEFAULTS[provider];
-                      const providerConfig = saved ? { ...defaults, ...saved } : defaults;
+                      const providerConfig = resolvedProviderConfig(provider, "video");
                       const model = compatibleModelForProvider(provider, "video", providerConfig?.model);
                       const nextCapabilities = videoCapabilitiesFor(provider, model);
                       const nextOptions = normalizeVideoGenerationOptions(nextCapabilities, { mode: config.mode, amount: config.amount });
@@ -5610,12 +6473,18 @@ export default function App() {
                       {nodeCapabilities.modes.map((mode) => <option value={mode} key={mode}>{modeLabels[mode]}</option>)}
                     </select>
                   </div>
-                  <textarea value={config.prompt || ""} onChange={(event) => update({ prompt: event.target.value })} placeholder="描述你想要生成的视频画面；可连接文本、图片或首尾帧作为参考…" />
+                  <BufferedProjectTextarea
+                    nodeId={n.id}
+                    value={config.prompt || ""}
+                    autoFocus={false}
+                    onCommit={(prompt) => update({ prompt })}
+                    placeholder="描述你想要生成的视频画面；可连接文本、图片或首尾帧作为参考…"
+                  />
                   <div className="online-video-tools">
                     <button title="提示词优化" onClick={() => setMessage("提示词优化会在接入模型后启用")}>✧ 优化</button>
                     <button title="翻译提示词" onClick={() => setMessage("提示词翻译会在接入模型后启用")}>文A 翻译</button>
                     <label>比例<select value={config.ratio} onChange={(event) => update({ ratio: event.target.value })}>{["Auto", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"].map((item) => <option key={item}>{item}</option>)}</select></label>
-                    <label>清晰度<select value={config.quality} onChange={(event) => update({ quality: event.target.value })}>{["480P", "720P", "1080P"].map((item) => <option key={item}>{item}</option>)}</select></label>
+                    <label>清晰度<select value={config.quality} onChange={(event) => update({ quality: event.target.value })}>{videoQualitiesFor(nodeCapabilities, config.ratio || "16:9", normalizedNodeOptions.mode).map((item) => <option key={item}>{item}</option>)}</select></label>
                     <label>时长<select value={config.duration} onChange={(event) => update({ duration: Number(event.target.value) })}>{[5, 6, 8, 10].map((item) => <option value={item} key={item}>{item} 秒</option>)}</select></label>
                     <label>数量<select value={normalizedNodeOptions.amount} onChange={(event) => update({ amount: Number(event.target.value) })}>{nodeCapabilities.amounts.map((item) => <option value={item} key={item}>{item} 个</option>)}</select></label>
                     <button disabled={!nodeSupportsAudio} title={nodeSupportsAudio ? "生成音频" : "当前模型没有原生音频合同"} className={config.audio && nodeSupportsAudio ? "active" : ""} onClick={() => update({ audio: !config.audio })}>{nodeSupportsAudio ? "🔊 音频" : "🔇 无原生音频"}</button>
@@ -6035,11 +6904,7 @@ export default function App() {
         const cloudModel = cloudModels.find((model) => model.id === config.model) || defaultCloudModel("video", cloudPlatform);
         const cloudMode = (config.mode || "text") as CloudVideoMode;
         const cloudModeText = (cloudModel?.videoModes || []).map((mode) => CLOUD_VIDEO_MODE_LABELS[mode]).join(" / ");
-        const savedByokProvider = onlineProviderConfigs[config.provider || ""];
-        const defaultByokProvider = ONLINE_PROVIDER_DEFAULTS[config.provider || ""];
-        const activeByokProvider = savedByokProvider
-          ? { ...defaultByokProvider, ...savedByokProvider }
-          : defaultByokProvider ? { ...defaultByokProvider, apiKey: "" } : undefined;
+        const activeByokProvider = resolvedProviderConfig(config.provider || "", "video");
         const allByokModels = activeByokProvider?.detectedModels || [];
         const byokModels = modelsForProvider(config.provider || "", "video").map((id) => {
           const detected = allByokModels.find((model) => model.id === id) || classifyProviderModel(id);
@@ -6072,9 +6937,20 @@ export default function App() {
           : source === "cloud"
             ? cloudModel?.videoModes || ["text"]
             : ["text"];
-        const selectableVideoAmounts = source === "byok" ? byokVideoCapabilities.amounts : [1];
+        const genericVideoRatios = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "2:1", "1:2"];
+        const genericVideoQualities = ["480P", "540P", "720P", "1080P", "1440P (2K)", "2160P (4K)"];
+        const selectableVideoAmounts = source === "byok" ? [1, 2, 3, 4, 5] : [1];
         const displayedVideoMode = source === "byok" ? normalizedByokVideoOptions.mode : (config.mode || "text") as VideoGenerationMode;
         const displayedVideoAmount = source === "byok" ? normalizedByokVideoOptions.amount : 1;
+        const byokVideoRatios = byokVideoCapabilities.ratios;
+        const byokVideoQualities = videoQualitiesFor(byokVideoCapabilities, config.ratio || "16:9", displayedVideoMode);
+        const displayedVideoQuality = source === "byok"
+          ? (config.quality || byokVideoQualities[0])
+          : config.quality;
+        const byokVideoDuration = byokVideoCapabilities.duration;
+        const displayedVideoDuration = source === "byok"
+          ? Math.min(25, Math.max(2, Number(config.duration) || 5))
+          : config.duration;
         const byokSupportsAudio = supportsVideoAudio(byokVideoCapabilities, displayedVideoMode);
         const displayedVideoAudio = source === "byok" ? byokSupportsAudio && config.audio !== false : config.audio !== false;
         const displayedByokInputLimit = videoInputLimitForMode(byokVideoCapabilities, displayedVideoMode);
@@ -6086,7 +6962,7 @@ export default function App() {
           promptLength: (config.prompt || "").length + linkedTextInputs.join("\n").length,
           references: references.length,
           amount: displayedVideoAmount,
-          resolution: config.quality,
+          resolution: displayedVideoQuality,
           duration: config.duration,
           audio: config.audio,
         }) : null;
@@ -6168,10 +7044,10 @@ export default function App() {
             const currentWorkflow = (currentNode.workflow || {}) as OnlineVideoSettings;
             return (currentWorkflow.prompt || "").trim() === prompt;
           };
-          const providerConfig = onlineProviderConfigs[config.provider || ""];
+          const providerConfig = resolvedProviderConfig(config.provider || "", "text");
           if (!prompt) { setMessage("请先输入提示词，再进行优化或翻译。"); return; }
           if (config.provider !== "阿里百炼·万相" || !providerConfig?.apiKey) {
-            openOnlineConfiguration("byok", "阿里百炼·万相");
+            openOnlineConfiguration("byok", "阿里百炼·万相", "text");
             setMessage(`${action === "translate" ? "翻译" : "优化"}需要阿里百炼密钥；已打开本机配置。`);
             return;
           }
@@ -6214,8 +7090,8 @@ export default function App() {
         const selectedComfyItem = comfyLibraryItems.find((item) => item.id === config.comfyWorkflowId)
           || (comfyLibraryItems.length === 1 ? comfyLibraryItems[0] : undefined);
         const publishedComfyParameters = (selectedComfyItem?.parameters || []).filter((parameter) => parameter.enabled && isBasicComfyParameter(parameter));
-        const generateOnlineVideo = async () => {
-          const prompt = [config.prompt || "", ...linkedTextInputs].filter((text) => text.trim()).join("\n\n").trim();
+        const generateOnlineVideo = async (promptOverride?: string) => {
+          const prompt = [promptOverride ?? config.prompt ?? "", ...linkedTextInputs].filter((text) => text.trim()).join("\n\n").trim();
           if (!prompt) {
             setMessage(`请先写入视频提示词；也可以把文本或参考素材连接到${generationSourceLabel[source]}节点。`);
             return;
@@ -6257,25 +7133,23 @@ export default function App() {
           }
           if (source === "byok") {
             if (!onlineVideoProviderNames.includes(config.provider || "")) {
-              openOnlineConfiguration("byok", config.provider === "未选择平台" ? undefined : config.provider);
+              openOnlineConfiguration("byok", config.provider === "未选择平台" ? undefined : config.provider, "video");
               setMessage("请先保存一个支持视频的 API 配置；保存后会直接显示在当前视频节点的平台和模型下拉框中。 ");
               return;
             }
-            const savedProviderConfig = onlineProviderConfigs[config.provider || ""];
-            const defaultProviderConfig = ONLINE_PROVIDER_DEFAULTS[config.provider || ""];
-            const providerConfig = savedProviderConfig ? { ...defaultProviderConfig, ...savedProviderConfig } : undefined;
+            const providerConfig = resolvedProviderConfig(config.provider || "", "video");
             if (!providerConfig?.endpoint || !providerConfig.apiKey) {
-              openOnlineConfiguration("byok", config.provider);
+              openOnlineConfiguration("byok", config.provider, "video");
               setMessage(`请先完成“${config.provider}”的接口地址和密钥配置。`);
               return;
             }
             if (!hasCompatibleByokVideoModel || !modelsForProvider(config.provider || "", "video").includes(selectedByokModelId)) {
-              openOnlineConfiguration("byok", config.provider);
+              openOnlineConfiguration("byok", config.provider, "video");
               setMessage(`“${config.provider}”当前没有已确认的视频模型；文本或图片模型不会填入视频节点。请在配置台为正确模型勾选“视频”。`);
               return;
             }
             if (config.provider === "可灵 Kling" && providerConfig.klingAuth === "aksk" && !providerConfig.apiSecret?.trim()) {
-              openOnlineConfiguration("byok", config.provider);
+              openOnlineConfiguration("byok", config.provider, "video");
               setMessage("可灵 AK/SK 签名方式需要同时填写 Access Key 和 Secret Key。");
               return;
             }
@@ -6290,30 +7164,43 @@ export default function App() {
               amount: config.amount,
             });
             const requestMode = normalizedRequestOptions.mode;
-            const requestQuality = config.provider === "可灵 Kling" && requestMode === "firstLast"
-              ? "1080P"
-              : config.quality || "720P";
-            const requestDuration = config.provider === "阿里百炼·万相" && requestMode === "firstLast"
-              ? 5
-              : config.duration || 5;
-            const requestAudio = supportsVideoAudio(requestCapabilities, requestMode) && config.audio !== false;
+            const supportedRequestQualities = videoQualitiesFor(requestCapabilities, config.ratio || "16:9", requestMode);
+            const requestQuality = config.quality || supportedRequestQualities[0];
+            const durationContract = requestCapabilities.duration;
+            const requestDuration = Math.min(25, Math.max(2, Number(config.duration) || 5));
+            const requestAmount = Math.min(5, Math.max(1, Number(config.amount) || 1));
+            const requestAudio = config.audio !== false;
             const hasNormalizedVideoSettings = normalizedRequestOptions.changed
-              || requestQuality !== config.quality
-              || requestDuration !== config.duration
-              || requestAudio !== config.audio
+              || requestAmount !== config.amount
               || configuredModel !== config.model
               || config.modelPinned !== true;
             const normalizedVideoPatch: Partial<OnlineVideoSettings> = {
               model: configuredModel,
               modelPinned: true,
               mode: requestMode,
-              amount: normalizedRequestOptions.amount,
+              amount: requestAmount,
               quality: requestQuality,
               duration: requestDuration,
               audio: requestAudio,
             };
+            const generationRecord: ApiGenerationRecord = {
+              kind: "video",
+              sourceNodeId: activeOnlineVideoNode.id,
+              workflow: { ...config, ...normalizedVideoPatch },
+              prompt,
+              createdAt: Date.now(),
+            };
             if (hasNormalizedVideoSettings) {
               update(normalizedVideoPatch);
+            }
+            const parameterErrors: string[] = [];
+            if (!requestCapabilities.ratios.includes(config.ratio || "16:9")) parameterErrors.push(`已确认比例为 ${requestCapabilities.ratios.join(" / ")}`);
+            if (!supportedRequestQualities.includes(requestQuality as (typeof supportedRequestQualities)[number])) parameterErrors.push(`已确认清晰度为 ${supportedRequestQualities.join(" / ")}`);
+            if (requestDuration < durationContract.minimum || requestDuration > durationContract.maximum) parameterErrors.push(`已确认时长为 ${durationContract.minimum}-${durationContract.maximum} 秒`);
+            if (requestAudio && !supportsVideoAudio(requestCapabilities, requestMode)) parameterErrors.push("当前模型未确认支持原生音频");
+            if (parameterErrors.length) {
+              setMessage(`“${configuredModel}”当前不能按所选参数生成：${parameterErrors.join("；")}。`);
+              return;
             }
             const unsupportedReferences = references.filter((item) => item.kind !== "image" || !item.src);
             if (unsupportedReferences.length) {
@@ -6323,7 +7210,7 @@ export default function App() {
             const imageReferences = references.filter((item) => item.kind === "image" && Boolean(item.src));
             const inputErrors = validateVideoGenerationInput(requestCapabilities, {
               mode: requestMode,
-              amount: normalizedRequestOptions.amount,
+              amount: requestAmount,
               imageCount: imageReferences.length,
             });
             if (inputErrors.length) {
@@ -6409,13 +7296,30 @@ export default function App() {
                 amount: normalizedRequestOptions.amount,
               });
               if (!canCommitRunWithInputs(runToken, runInputSignature)) return;
-              const [generatedWidth, generatedHeight] = onlineVideoSizeForRatio(config.ratio);
+              // The provider may return a different valid frame than the
+              // requested ratio. Decode the finished video and size the card
+              // from its actual frame, rather than leaving a portrait result
+              // inside the old landscape node and cropping it with cover.
+              const decodedVideoDimensions = await readGeneratedMediaDimensions("video", result.video_url);
+              if (!canCommitRunWithInputs(runToken, runInputSignature)) return;
+              const requestedSize = onlineVideoSizeForRatio(config.ratio);
+              const cardSize = decodedVideoDimensions
+                ? generatedMediaCardSize("video", decodedVideoDimensions)
+                : { width: requestedSize[0], height: requestedSize[1] + 29 };
+              const generatedWidth = cardSize.width;
+              const generatedHeight = cardSize.height - 29;
               const generated: NodeItem = {
                 id: newId(), kind: "video", x: activeOnlineVideoNode.x + activeOnlineVideoNode.width + 80, y: activeOnlineVideoNode.y,
-                width: generatedWidth, height: generatedHeight + 29, name: `${providerShortName}-${result.task_id}.mp4`, fileName: `${providerShortName}-${result.task_id}.mp4`, src: result.video_url, createdAt: Date.now(),
+                width: cardSize.width, height: cardSize.height, name: `${providerShortName}-${result.task_id}.mp4`, fileName: `${providerShortName}-${result.task_id}.mp4`, src: result.video_url, createdAt: Date.now(),
+                generationRecord,
               };
               if (activeOnlineVideoNode.kind === "video") {
-                change((p) => ({ ...p, nodes: p.nodes.map((node) => node.id === activeOnlineVideoNode.id ? { ...node, status: "done", src: result.video_url, fileName: generated.fileName, name: generated.name, mediaWidth: generatedWidth, mediaHeight: generatedHeight } : node) }));
+                change((p) => ({ ...p, nodes: p.nodes.map((node) => node.id === activeOnlineVideoNode.id ? { ...node, status: "done", src: result.video_url, fileName: generated.fileName, name: generated.name, width: cardSize.width, height: cardSize.height, mediaWidth: decodedVideoDimensions?.width || generatedWidth, mediaHeight: decodedVideoDimensions?.height || generatedHeight, generationRecord } : node) }));
+                // Direct video nodes reuse their own card instead of adding a
+                // second card, but the output is still a newly generated
+                // asset and must appear in the same recent-media tray.
+                setRecent((items) => [generated, ...items]);
+                setRecentOpen(true);
                 setMessage(`${providerShortName}视频已直接生成到当前视频节点。`);
               } else {
                 setRecent((items) => [generated, ...items]);
@@ -6451,6 +7355,14 @@ export default function App() {
           setMessage("亿幕云端配置已保存，但云端账户、积分账本与任务服务尚未部署；当前不会扣费或提交任务。 ");
         };
         return <section className="online-video-composer online-video-unified-console" onPointerDown={(event) => event.stopPropagation()}>
+          {pendingVideoRegeneration?.sourceNodeId === activeOnlineVideoNode.id && <OneShotGenerationTrigger
+            requestId={pendingVideoRegeneration.requestId}
+            run={() => {
+              const request = pendingVideoRegeneration;
+              setPendingVideoRegeneration(null);
+              return generateOnlineVideo(request.prompt);
+            }}
+          />}
           <button className="online-video-console-close" title="关闭" onClick={() => setActiveOnlineVideo(null)}>×</button>
           <div className="online-reference-dock" aria-label="参考素材">
             {references.length > 0 && <div className="online-reference-stack" title="鼠标移入展开全部参考素材">
@@ -6487,14 +7399,20 @@ export default function App() {
             {popover === "promptLibrary" && <><b>提示词库</b><small>已改为独立面板，可搜索、分类、重命名并插入当前提示词。</small><button onClick={() => setPromptLibraryTarget({ nodeId: activeOnlineVideoNode.id, kind: "video" })}>打开提示词库</button></>}
           </div>}
           {linkedTextInputs.length > 0 && <div className="online-linked-input-note" title="这些内容来自连到当前视频节点的文本或分镜节点，会在提交时自动合并进提示词。">已连接 {linkedTextInputs.length} 条文本输入 · 生成时自动带入</div>}
-          <textarea className="online-video-prompt" autoFocus value={config.prompt || ""} onChange={(event) => {
-            const value = event.target.value;
-            const caret = event.currentTarget.selectionStart ?? value.length;
-            const match = value.slice(0, caret).match(/@[^\s，。；、,.!?]*$/);
-            update({ prompt: value });
-            if (match && references.length > 0) setAtReferenceMenu({ nodeId: activeOnlineVideoNode.id, start: caret - match[0].length, end: caret });
-            else setAtReferenceMenu(null);
-          }} onKeyDown={(event) => { if (event.key === "Escape") { setAtReferenceMenu(null); } else if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); generateOnlineVideo(); } }} placeholder="描述你想要生成的画面内容，输入 @ 可引用上方图片" />
+          <BufferedProjectTextarea
+            className="online-video-prompt"
+            nodeId={activeOnlineVideoNode.id}
+            value={config.prompt || ""}
+            onCommit={(prompt) => update({ prompt })}
+            onDraft={(value, field) => {
+              const caret = field.selectionStart ?? value.length;
+              const match = value.slice(0, caret).match(/@[^\s，。；、,.!?]*$/);
+              if (match && references.length > 0) setAtReferenceMenu({ nodeId: activeOnlineVideoNode.id, start: caret - match[0].length, end: caret });
+              else setAtReferenceMenu(null);
+            }}
+            onSubmit={(prompt) => void generateOnlineVideo(prompt)}
+            placeholder="描述你想要生成的画面内容，输入 @ 可引用上方图片"
+          />
           <div className="online-video-consolebar">
             {source === "byok" && (onlineVideoProviderNames.length ? <select aria-label="平台" value={onlineVideoProviderNames.includes(config.provider || "") ? config.provider : ""} onChange={(event) => {
               const provider = event.target.value;
@@ -6515,7 +7433,7 @@ export default function App() {
               const nextOptions = normalizeVideoGenerationOptions(nextCapabilities, { mode: config.mode, amount: config.amount });
               update({ model: event.target.value, modelPinned: true, mode: nextOptions.mode, amount: nextOptions.amount });
             }}>{byokModels.map((model) => <option value={model.id} key={model.id}>{model.id}｜{model.purpose}</option>)}</select>}
-            {source === "byok" && byokModels.length === 0 && <button className="online-video-source-status" onClick={() => openOnlineConfiguration("byok", config.provider)} title="当前平台没有已确认的视频生成模型">无匹配视频模型</button>}
+            {source === "byok" && byokModels.length === 0 && <button className="online-video-source-status" onClick={() => openOnlineConfiguration("byok", config.provider, "video")} title="当前平台没有已确认的视频生成模型">无匹配视频模型</button>}
             {source === "comfy" && <button className={`online-video-source-status ${comfyConnected ? "ready" : ""}`} title="检查本地 ComfyUI" onClick={() => void autoConnect()}>{comfyConnected ? "本地已连接" : "未连接 ComfyUI"}</button>}
             {source === "comfy" && <select className="online-video-workflow-select" aria-label="ComfyUI 工作流" value={config.comfyWorkflowId || ""} onChange={(event) => update({ comfyWorkflowId: event.target.value, comfyValues: {} })}><option value="">选择工作流</option>{comfyLibraryItems.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select>}
             {source === "cloud" && <select aria-label="云端视频平台" value={cloudPlatform} onChange={(event) => {
@@ -6555,9 +7473,10 @@ export default function App() {
               setMessage(compatibleModel ? `已自动切换到支持“${CLOUD_VIDEO_MODE_LABELS[cloudMode]}”的 ${compatibleModel.label}。` : `当前云端模型暂不支持“${CLOUD_VIDEO_MODE_LABELS[cloudMode]}”。`);
             }}>{selectableVideoModes.map((mode) => <option value={mode} key={mode}>{modes[mode]}{source === "byok" && !byokVideoCapabilities.modes.includes(mode) ? "（将自动换模型）" : source === "cloud" && !supportsCloudVideoMode(cloudModel, mode as CloudVideoMode) ? "（将自动换模型）" : ""}</option>)}</select>
             <div className="online-video-menu-anchor">
-              <button className="online-video-params-trigger" title={source === "byok" && !byokSupportsAudio ? "当前模型不支持原生音频" : "视频参数"} aria-label="视频参数" onClick={() => setOnlinePopover(popover === "params" ? null : { nodeId: activeOnlineVideoNode.id, kind: "params" })}>▭ {source === "comfy" ? `${selectedComfyItem?.name || "选择工作流"} · ${publishedComfyParameters.length}项参数` : `${config.ratio} · ${config.quality} · ${config.duration}s · ${displayedVideoAmount}个 · ${displayedVideoAudio ? "🔊" : "🔇"}`}⌄</button>
+              <button className="online-video-params-trigger" title={source === "byok" && !byokSupportsAudio ? "当前模型不支持原生音频" : "视频参数"} aria-label="视频参数" onClick={() => setOnlinePopover(popover === "params" ? null : { nodeId: activeOnlineVideoNode.id, kind: "params" })}>▭ {source === "comfy" ? `${selectedComfyItem?.name || "选择工作流"} · ${publishedComfyParameters.length}项参数` : `${config.ratio} · ${displayedVideoQuality} · ${displayedVideoDuration}s · ${displayedVideoAmount}个 · ${displayedVideoAudio ? "🔊" : "🔇"}`}⌄</button>
               {popover === "params" && <div className="online-video-floating-popover online-video-params-popover">
-                <b>{source === "comfy" ? "ComfyUI 工作流参数" : "视频参数"}</b><small>{source === "comfy" ? "参数来自工作流库，只修改当前节点的运行副本。" : "比例、清晰度、时长、音频与生成数量。"}</small>
+                <b>{source === "comfy" ? "ComfyUI 工作流参数" : "视频参数"}</b><small>{source === "comfy" ? "参数来自工作流库，只修改当前节点的运行副本。" : "通用参数可自由选择；生成前会检查当前模型的已确认能力。"}</small>
+                {source === "byok" && <small>当前模型已确认：比例 {byokVideoRatios.join(" / ")}；清晰度 {byokVideoQualities.join(" / ")}；时长 {byokVideoDuration.minimum}-{byokVideoDuration.maximum} 秒；单任务 {byokVideoCapabilities.amounts.join("、")} 个。</small>}
                 {source === "comfy" ? <div className="online-comfy-parameter-list">
                   {!selectedComfyItem && <small>请先从下方选择一个工作流。</small>}
                   {selectedComfyItem && !publishedComfyParameters.length && <button onClick={() => setWorkflowLibraryOpen(true)}>到工作流库扫描参数</button>}
@@ -6565,16 +7484,16 @@ export default function App() {
                     ? <select value={String(config.comfyValues?.[parameter.id] ?? parameter.value)} onChange={(event) => update({ comfyValues: { ...(config.comfyValues || {}), [parameter.id]: event.target.value === "true" } })}><option value="true">开启</option><option value="false">关闭</option></select>
                     : <input type={parameter.kind === "number" ? "number" : "text"} value={String(config.comfyValues?.[parameter.id] ?? parameter.value)} onChange={(event) => update({ comfyValues: { ...(config.comfyValues || {}), [parameter.id]: parameter.kind === "number" ? Number(event.target.value) : event.target.value } })} />}</label>)}
                 </div> : <>
-                <div className="online-param-section online-param-wide"><strong>比例</strong><div className="online-param-options online-param-ratios">{["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"].map((item) => <button className={config.ratio === item ? "active" : ""} key={item} onClick={() => update({ ratio: item })}>{item}</button>)}</div></div>
-                <div className="online-param-section"><strong>清晰度</strong><div className="online-param-options">{["480P", "720P", "1080P", "4K"].map((item) => <button className={config.quality === item ? "active" : ""} key={item} onClick={() => update({ quality: item })}>{item}</button>)}</div></div>
-                <div className="online-param-section"><strong>视频时长</strong><label className="online-duration-control"><input type="range" min="5" max="10" step="1" value={config.duration} onChange={(event) => update({ duration: Number(event.target.value) })} /><output>{config.duration} 秒</output></label></div>
+                <div className="online-param-section online-param-wide"><strong>比例</strong><div className="online-param-options online-param-ratios">{(source === "byok" ? genericVideoRatios : ["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"]).map((item) => <button className={config.ratio === item ? "active" : ""} key={item} onClick={() => update({ ratio: item })}>{item}</button>)}</div></div>
+                <div className="online-param-section"><strong>清晰度</strong><div className="online-param-options">{(source === "byok" ? genericVideoQualities : ["480P", "720P", "1080P"]).map((item) => <button className={displayedVideoQuality === item ? "active" : ""} key={item} onClick={() => update({ quality: item })}>{item}</button>)}</div></div>
+                <div className="online-param-section"><strong>视频时长</strong><label className="online-duration-control"><input type="range" min="2" max="25" step="1" value={displayedVideoDuration} onChange={(event) => update({ duration: Number(event.target.value) })} /><output>{displayedVideoDuration} 秒</output></label></div>
                 <div className="online-param-section"><strong>生成音频</strong>{source === "byok" && !byokSupportsAudio ? <small>当前模型不支持原生音频；不会提交音频参数。</small> : <div className="online-param-options two"><button className={config.audio ? "active" : ""} onClick={() => update({ audio: true })}>开启</button><button className={!config.audio ? "active" : ""} onClick={() => update({ audio: false })}>关闭</button></div>}</div>
                 <div className="online-param-section"><strong>生成数量</strong><div className="online-param-options three">{selectableVideoAmounts.map((item) => <button className={displayedVideoAmount === item ? "active" : ""} key={item} onClick={() => update({ amount: item })}>{item}个</button>)}</div></div>
                 </>}
               </div>}
             </div>
             <button className="online-video-icon-button" title="提示词优化" aria-label="提示词优化" onClick={() => void rewritePrompt("optimize")}>✧</button><button className="online-video-icon-button" title="翻译提示词为英文" aria-label="翻译提示词为英文" onClick={() => void rewritePrompt("translate")}>文</button><div className="online-video-menu-anchor"><button className="online-video-icon-button" title="生成来源设置" aria-label="生成来源设置" onClick={() => setOnlinePopover(popover === "settings" ? null : { nodeId: activeOnlineVideoNode.id, kind: "settings" })}>☷</button>{popover === "settings" && <div className="online-video-floating-popover online-video-source-popover"><b>生成设置</b><small>本地 ComfyUI 在这里切换；云端平台请用左侧“添加配置 / 已配置”管理。</small><div className="online-settings-sources"><button className={source === "comfy" ? "active" : ""} onClick={() => { update({ source: "comfy" }); void autoConnect(); setOnlinePopover(null); }}>本地 ComfyUI</button><button className={source === "byok" ? "active" : ""} onClick={() => { update({ source: "byok" }); setOnlinePopover(null); }}>已保存 API 配置</button></div></div>}</div>
-            <button className="online-video-generate" disabled={source === "byok" && !hasCompatibleByokVideoModel} title={source === "byok" && !hasCompatibleByokVideoModel ? "请先配置真正支持视频的模型" : "生成视频（Enter）"} onClick={generateOnlineVideo}>{source === "byok" && !hasCompatibleByokVideoModel ? "配置视频模型" : "生成"} <span>↵</span></button>
+            <button className="online-video-generate" disabled={source === "byok" && !hasCompatibleByokVideoModel} title={source === "byok" && !hasCompatibleByokVideoModel ? "请先配置真正支持视频的模型" : "生成视频（Enter）"} onClick={() => void generateOnlineVideo()}>{source === "byok" && !hasCompatibleByokVideoModel ? "配置视频模型" : "生成"} <span>↵</span></button>
           </div>
         </section>;
       })()}
@@ -6664,20 +7583,13 @@ export default function App() {
               )}
             </div>
           </div>
-          <textarea
-            autoFocus
+          <BufferedProjectTextarea
+            nodeId={activeTextNode.id}
             value={activeTextNode.text || ""}
-            onChange={(event) =>
-              change((current) => ({
-                ...current,
-                nodes: current.nodes.map((node) =>
-                  node.id === activeTextNode.id
-                    ? { ...node, text: event.target.value }
-                    : node,
-                ),
-              }))
-            }
-            placeholder="输入剧本、提示词、镜头说明或对白……"
+            onCommit={(text) => change((current) => ({
+              ...current,
+              nodes: current.nodes.map((node) => node.id === activeTextNode.id ? { ...node, text } : node),
+            }))}
           />
         </section>
       )}
@@ -6945,6 +7857,13 @@ export default function App() {
                 ) : null;
               })()}
               {(() => {
+                const context = menu.node ? apiGenerationContextFor(menu.node) : null;
+                return context ? <>
+                  <button onClick={() => modifyApiGeneration(context.target.id)}>修改</button>
+                  <button onClick={() => regenerateApiOutput(context.target.id)}>重新生成</button>
+                </> : null;
+              })()}
+              {(() => {
                 const target = project.nodes.find((node) => node.id === menu.node);
                 const grpForNode = (project.groups || []).find((g) => g.nodeIds.includes(menu.node || "")); if (grpForNode && menu.node !== "__selection__") {
   return <button className="danger" onClick={() => { change((p) => ({ ...p, groups: (p.groups || []).map((g2) => g2.id === grpForNode.id ? { ...g2, nodeIds: g2.nodeIds.filter((id) => id !== menu.node) } : g2).filter((g2) => g2.nodeIds.length > 1) })); setMenu(null); }}>拆分节点</button>;
@@ -7141,7 +8060,7 @@ const workflowId = project.links
               requestAiTextProviderConfiguration(workflow.provider || "OpenAI");
               return;
             }
-            openOnlineConfiguration("byok", workflow.provider || "OpenAI");
+            openOnlineConfiguration("byok", workflow.provider || "OpenAI", "image");
             setMessage("先保存图片平台的接口地址、API Key 和模型；保存后会直接出现在这个图片节点。 ");
           }}
           onOpenPromptLibrary={() => setPromptLibraryTarget({ nodeId: activeAiNodeItem.id, kind: "ai" })}

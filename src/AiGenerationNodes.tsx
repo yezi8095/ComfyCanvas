@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { startTransition, useEffect, useRef, useState, type RefObject } from "react";
 import { comfyParameterHelp, isBasicComfyParameter, readComfyWorkflowLibrary } from "./ComfyWorkflowParameters";
 import { cloudModelsFor, cloudPlatformsFor, defaultCloudModel, estimateCloudPoints, type CloudModelKind } from "./CloudModelCatalog";
 import { imageCapabilitiesFor, type ImageAspectRatio, type ImageQuality, type ImageResolution } from "./core/providers/imageCapabilities";
@@ -39,6 +39,10 @@ export const AI_IMAGE_PROVIDER_PRESETS = {
   "Google Nano Banana": {
     models: ["gemini-3.1-flash-image", "gemini-3.1-flash-lite-image", "gemini-3-pro-image", "gemini-2.5-flash-image"],
     defaultModel: "gemini-3.1-flash-image",
+  },
+  "Pollinations（免费测试）": {
+    models: ["flux"],
+    defaultModel: "flux",
   },
   "Midjourney（手动命令）": {
     models: ["V8.1"],
@@ -114,6 +118,78 @@ type ComposerAsyncSession = {
   active: boolean;
 };
 
+function BufferedAiPrompt({
+  inputRef,
+  value,
+  onCommit,
+  onDraft,
+  placeholder,
+}: {
+  inputRef: RefObject<HTMLTextAreaElement | null>;
+  value: string;
+  onCommit: (value: string) => void;
+  onDraft: (value: string, caret: number) => void;
+  placeholder: string;
+}) {
+  const timerRef = useRef<number | null>(null);
+  const idleRef = useRef<number | null>(null);
+  const committed = useRef(value);
+  const commitRef = useRef(onCommit);
+  commitRef.current = onCommit;
+  useEffect(() => {
+    committed.current = value;
+    const field = inputRef.current;
+    if (field && document.activeElement !== field && field.value !== value) field.value = value;
+  }, [inputRef, value]);
+  const cancelScheduledCommit = () => {
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = null;
+    if (idleRef.current !== null && "cancelIdleCallback" in window) {
+      window.cancelIdleCallback(idleRef.current);
+    }
+    idleRef.current = null;
+  };
+  const flush = () => {
+    cancelScheduledCommit();
+    const next = inputRef.current?.value ?? committed.current;
+    if (next === committed.current) return;
+    committed.current = next;
+    commitRef.current(next);
+  };
+  const queueCommit = () => {
+    cancelScheduledCommit();
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null;
+      const commitWhenIdle = () => {
+        idleRef.current = null;
+        const next = inputRef.current?.value ?? committed.current;
+        if (next === committed.current) return;
+        committed.current = next;
+        startTransition(() => commitRef.current(next));
+      };
+      if ("requestIdleCallback" in window) {
+        idleRef.current = window.requestIdleCallback(commitWhenIdle, { timeout: 3000 });
+      } else {
+        idleRef.current = setTimeout(commitWhenIdle, 0);
+      }
+    }, 900);
+  };
+  useEffect(() => () => flush(), []);
+  return <textarea
+    ref={inputRef}
+    className="ai-console-prompt"
+    autoFocus
+    defaultValue={value}
+    onInput={(event) => {
+      const field = event.currentTarget;
+      onDraft(field.value, field.selectionStart ?? field.value.length);
+      queueCommit();
+    }}
+    onBlur={flush}
+    placeholder={placeholder}
+  />;
+}
+
 type AiNode = {
   id: string;
   kind: "aiText" | "aiImage" | "text" | "image";
@@ -179,6 +255,7 @@ export function AiGenerationComposer({
   onOpenPromptLibrary?: () => void;
 }) {
   const [parametersOpen, setParametersOpen] = useState(false);
+  const [sourceSettingsOpen, setSourceSettingsOpen] = useState(false);
   const [canvasPickerOpen, setCanvasPickerOpen] = useState(false);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const [describing, setDescribing] = useState(false);
@@ -238,30 +315,37 @@ export function AiGenerationComposer({
     ...storedImage,
   };
   const imageCapabilities = imageCapabilitiesFor(image.provider, image.model);
-  const imageRatios = [...imageCapabilities.ratios];
+  // Keep the composer universal. Provider/model capabilities are shown as a
+  // status hint and checked before a request, rather than shrinking the whole
+  // editor to two options whenever a model has an incomplete profile.
+  const imageRatios: readonly ImageAspectRatio[] = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "7:4", "4:7", "9:16", "16:9", "21:9"];
+  const universalImageSizes: Record<ImageAspectRatio, readonly string[]> = {
+    "1:1": ["512x512", "768x768", "1024x1024", "1536x1536", "2048x2048"],
+    "2:3": ["512x768", "768x1152", "1024x1536", "1365x2048"], "3:2": ["768x512", "1152x768", "1536x1024", "2048x1365"],
+    "3:4": ["576x768", "768x1024", "960x1280", "1536x2048"], "4:3": ["768x576", "1024x768", "1280x960", "2048x1536"],
+    "4:5": ["640x800", "768x960", "1024x1280", "1638x2048"], "5:4": ["800x640", "960x768", "1280x1024", "2048x1638"],
+    "7:4": ["896x512", "1120x640", "1400x800", "1792x1024"], "4:7": ["512x896", "640x1120", "800x1400", "1024x1792"],
+    "9:16": ["512x896", "576x1024", "720x1280", "864x1536", "1080x1920", "1152x2048"], "16:9": ["896x512", "1024x576", "1280x720", "1536x864", "1920x1080", "2048x1152"],
+    "21:9": ["896x384", "1344x576", "1792x768", "2048x878"],
+  };
   const resolutionsForRatio = (ratio: string) => {
-    const exact = imageCapabilities.requestSizes
-      .filter((item) => item.ratio === ratio)
-      .map((item) => item.resolution);
-    return [...new Set(exact.length ? exact : imageCapabilities.resolutions)];
+    return universalImageSizes[ratio as ImageAspectRatio] || universalImageSizes["1:1"];
+  };
+  const imageResolutionLabel = (resolution: string) => {
+    if (/^\d{2,5}x\d{2,5}$/i.test(resolution)) return resolution.replace("x", " × ");
+    const value = Number(resolution);
+    return Number.isFinite(value) && value >= 1024 ? `${Math.round(value / 1024)}K` : Number.isFinite(value) ? `${resolution}px` : resolution;
   };
   const imageResolutions = resolutionsForRatio(image.ratio);
   const normalizeImageSelection = (provider: string, model: string, patch: Record<string, unknown> = {}) => {
-    const capabilities = imageCapabilitiesFor(provider, model);
     const requestedRatio = String(patch.ratio ?? image.ratio) as ImageAspectRatio;
-    const ratio = capabilities.ratios.includes(requestedRatio) ? requestedRatio : capabilities.ratios[0];
-    const exactResolutions = capabilities.requestSizes
-      .filter((item) => item.ratio === ratio)
-      .map((item) => item.resolution);
-    const resolutions = [...new Set(exactResolutions.length ? exactResolutions : capabilities.resolutions)];
+    const ratio = imageRatios.includes(requestedRatio) ? requestedRatio : imageRatios[0];
+    const resolutions = resolutionsForRatio(ratio);
     const requestedResolution = String(patch.resolution ?? image.resolution) as ImageResolution;
     const resolution = resolutions.includes(requestedResolution) ? requestedResolution : resolutions[0];
     const requestedAmount = Number(patch.amount ?? image.amount);
-    const amount = capabilities.amounts.includes(requestedAmount) ? requestedAmount : capabilities.amounts[0];
-    const requestedQuality = String(patch.quality ?? image.quality ?? "") as ImageQuality;
-    const quality = capabilities.qualities.includes(requestedQuality)
-      ? requestedQuality
-      : capabilities.qualities[0];
+    const amount = Number.isFinite(requestedAmount) ? Math.min(5, Math.max(1, Math.trunc(requestedAmount))) : 1;
+    const quality = String(patch.quality ?? image.quality ?? "") as ImageQuality;
     return { ...patch, provider, model, ratio, resolution, amount, quality };
   };
   const config = isText ? text : image;
@@ -306,7 +390,7 @@ export function AiGenerationComposer({
   ];
   const insertImageMention = (index: number) => {
     const textarea = promptRef.current;
-    const value = image.prompt;
+    const value = textarea?.value ?? image.prompt;
     const selectionStart = textarea?.selectionStart ?? value.length;
     const selectionEnd = textarea?.selectionEnd ?? selectionStart;
     const beforeSelection = value.slice(0, selectionStart);
@@ -319,6 +403,7 @@ export function AiGenerationComposer({
     const prompt = `${value.slice(0, replaceStart)}${inserted}${suffix}`;
     const nextCaret = replaceStart + inserted.length;
     update({ prompt, mode: "image" });
+    if (textarea) textarea.value = prompt;
     setMentionOpen(false);
     requestAnimationFrame(() => {
       promptRef.current?.focus();
@@ -504,15 +589,11 @@ export function AiGenerationComposer({
 
     {linkedTextInputs.length > 0 && <div className="online-linked-input-note" title="这些内容来自连到当前节点的文本或分镜节点，会在提交时自动合并进提示词。">已连接 {linkedTextInputs.length} 条文本输入 · 生成时自动带入</div>}
 
-    <textarea
-      ref={promptRef}
-      className="ai-console-prompt"
-      autoFocus
+    <BufferedAiPrompt
+      inputRef={promptRef}
       value={config.prompt}
-      onChange={(event) => {
-        const value = event.target.value;
-        const caret = event.currentTarget.selectionStart ?? value.length;
-        update({ prompt: value });
+      onCommit={(value) => update({ prompt: value })}
+      onDraft={(value, caret) => {
         const references = isText ? textReferences : imageReferences;
         if (references.length) {
           const match = value.slice(0, caret).match(/@[^\s，。；、,.!?]*$/);
@@ -572,9 +653,9 @@ export function AiGenerationComposer({
           update(normalizeImageSelection(provider, model));
         }
       }}>
-        {!hasSavedApiProvider && <option value="">选择已保存的平台</option>}
+        {!hasSavedApiProvider && <option value="">选择{isText ? "文本" : "图片"}平台</option>}
         {availableProviders.map((provider) => <option key={provider.name}>{provider.name}</option>)}
-      </select> : <button className="ai-configure-button" onClick={onOpenApiConfiguration}>配置 API</button>}
+      </select> : <select aria-label="生成平台" disabled value=""><option>暂无{isText ? "文本" : "图片"}平台</option></select>}
       {isText && config.source === "byok" && availableModels.length > 0 && <select aria-label="剧本模型" value={hasSavedApiProvider ? text.model : ""} onChange={(event) => update({ model: event.target.value })}>
         {!hasSavedApiProvider && <option value="">选择模型</option>}
         {availableModels.map((model) => <option key={model}>{model}</option>)}
@@ -592,6 +673,7 @@ export function AiGenerationComposer({
       {config.source === "comfy" && <button className="ai-console-icon" title="选择工作流" onClick={onOpenWorkflowLibrary}>↗</button>}
       <button className="ai-console-icon" title="提示词优化">✧</button>
       <button className="ai-console-icon" title="翻译提示词">文</button>
+      {!isText && <div className="ai-source-settings"><button className="ai-console-icon" title="生成设置" aria-label="生成设置" onClick={() => setSourceSettingsOpen(!sourceSettingsOpen)}>☷</button>{sourceSettingsOpen && <div className="ai-source-settings-popover"><b>生成设置</b><small>切换本地 ComfyUI 或已保存的图片 API 配置。</small><button className={config.source === "comfy" ? "active" : ""} onClick={() => { update({ source: "comfy" }); setSourceSettingsOpen(false); }}>本地 ComfyUI</button><button className={config.source === "byok" ? "active" : ""} onClick={() => { if (!hasSavedApiProvider) onOpenApiConfiguration?.(); update({ source: "byok" }); setSourceSettingsOpen(false); }}>已保存 API 配置</button></div>}</div>}
       <button className={`ai-console-icon ai-prompt-expand-icon ${promptExpanded ? "active" : ""}`} title={promptExpanded ? "收起编辑框" : "放大编辑框"} aria-label={promptExpanded ? "收起编辑框" : "放大编辑框"} onClick={() => setPromptExpanded(!promptExpanded)}>⛶</button>
       <button className="ai-generate-button" disabled={node.status === "running" || (hasUsableProvider && !config.prompt.trim() && !linkedTextInputs.some((text) => text.trim()))} onClick={() => {
         if (!hasUsableProvider) {
@@ -600,7 +682,7 @@ export function AiGenerationComposer({
         }
         onGenerate();
       }}>
-        {node.status === "running" ? "生成中…" : !hasUsableProvider ? "配置 API" : isText ? isStoryboardFrames ? "生成分镜 ↵" : "生成剧本 ↵" : "生成图片 ↵"}
+        {node.status === "running" ? "生成中…" : isText ? isStoryboardFrames ? "生成分镜 ↵" : "生成剧本 ↵" : "生成图片 ↵"}
       </button>
     </div>
 
@@ -658,16 +740,16 @@ export function AiGenerationComposer({
         <label className="ai-check"><input type="checkbox" checked={text.includeStoryboard} onChange={(event) => update({ includeStoryboard: event.target.checked })} />附分镜建议</label>
         </>}
       </> : <>
-        <label title="只显示当前模型真实支持的比例">画面比例<select value={image.ratio} onChange={(event) => update(normalizeImageSelection(image.provider, image.model, { ratio: event.target.value }))}>{imageRatios.map((ratio) => <option value={ratio} key={ratio}>{ratio}</option>)}</select></label>
-        {imageResolutions.length > 0 && <label title="比例改变时会自动切换到服务端接受的尺寸">分辨率<select value={image.resolution} onChange={(event) => update(normalizeImageSelection(image.provider, image.model, { resolution: event.target.value }))}>{imageResolutions.map((resolution) => <option value={resolution} key={resolution}>{Number(resolution) >= 1024 ? `${Math.round(Number(resolution) / 1024)}K` : `${resolution}px`}</option>)}</select></label>}
-        <label title={imageCapabilities.amounts.length === 1 ? "当前桌面适配器一次只返回一张图片" : "当前模型支持的批量数量"}>生成数量<select value={image.amount} disabled={imageCapabilities.amounts.length === 1} onChange={(event) => update({ amount: Number(event.target.value) })}>{imageCapabilities.amounts.map((amount) => <option value={amount} key={amount}>{amount} 张</option>)}</select></label>
+        <label title="通用比例；提交前会提示当前模型的已确认能力">画面比例<select value={image.ratio} onChange={(event) => update(normalizeImageSelection(image.provider, image.model, { ratio: event.target.value }))}>{imageRatios.map((ratio) => <option value={ratio} key={ratio}>{ratio}</option>)}</select></label>
+        {imageResolutions.length > 0 && <label title="比例改变时会跟随切换一组实际宽高">分辨率<select value={image.resolution} onChange={(event) => update(normalizeImageSelection(image.provider, image.model, { resolution: event.target.value }))}>{imageResolutions.map((resolution) => <option value={resolution} key={resolution}>{imageResolutionLabel(resolution)}</option>)}</select></label>}
+        <label title="通用批量数量；不支持的模型会在生成状态中明确提示">生成数量<select value={image.amount} onChange={(event) => update({ amount: Number(event.target.value) })}>{[1,2,3,4,5].map((amount) => <option value={amount} key={amount}>{amount} 张</option>)}</select></label>
         {imageCapabilities.qualities.length > 0 && <label>生成质量<select value={image.quality || imageCapabilities.qualities[0]} onChange={(event) => update({ quality: event.target.value })}>{imageCapabilities.qualities.map((quality) => <option value={quality} key={quality}>{quality}</option>)}</select></label>}
         <label>视觉风格<select value={image.style} onChange={(event) => update({ style: event.target.value })}><option>电影写实</option><option>商业摄影</option><option>概念设计</option><option>日系动画</option><option>水彩插画</option><option>3D 渲染</option></select></label>
         <label>随机种子<input type="number" value={image.seed} onChange={(event) => update({ seed: Number(event.target.value) })} /></label>
         <label className="wide">反向提示词<input value={image.negativePrompt} onChange={(event) => update({ negativePrompt: event.target.value })} placeholder="模糊、畸形、低质量……" /></label>
         <label className="ai-range wide">提示词强度 <b>{image.guidance}</b><input type="range" min="1" max="20" step="0.5" value={image.guidance} onChange={(event) => update({ guidance: Number(event.target.value) })} /></label>
       </>}</>}
-      <div className="ai-parameter-source wide"><span className={`ai-source-dot ${config.source}`} />{sourceLabel}<small>参数会保存到当前节点</small></div>
+      <div className="ai-parameter-source wide"><span className={`ai-source-dot ${config.source}`} />{sourceLabel}<small>{isText ? "参数会保存到当前节点" : `已确认：${imageCapabilities.ratios.join(" / ")}；尺寸档 ${imageCapabilities.resolutions.join(" / ")}；单任务 ${imageCapabilities.amounts.join("、")} 张。其他通用组合将由平台返回是否支持。`}</small></div>
     </div>}
   </section>;
 }
